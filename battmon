@@ -838,9 +838,18 @@ service_menu() {
 }
 
 clear_main_menu_screen() {
-    # CSI 3 J clears saved scrollback; CSI 2 J clears the visible display;
-    # CSI H places the next dashboard at the top-left corner.
-    printf '\033[3J\033[2J\033[H'
+    # Use the terminal's terminfo-aware clear sequence first.
+    if command -v clear >/dev/null 2>&1; then
+        clear 2>/dev/null || true
+    fi
+    # iTerm2 documents this OSC sequence specifically for clearing scrollback.
+    # Run it after `clear` so lines removed from the display are erased too.
+    if [ "${TERM_PROGRAM:-}" = "iTerm.app" ] || [ -n "${ITERM_SESSION_ID:-}" ]; then
+        printf '\033]1337;ClearScrollback\a'
+    fi
+    # CSI 3 J clears conventional scrollback; CSI 2 J clears the display;
+    # CSI H places the dashboard at the top-left corner.
+    printf '\033[H\033[2J\033[3J\033[H'
 }
 
 main_menu() {
