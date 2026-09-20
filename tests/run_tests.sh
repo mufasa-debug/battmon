@@ -303,6 +303,36 @@ else
     fail "main menu clears screen and scrollback on every render"
 fi
 
+# Trigger choices use plain language and state exactly when speech stops.
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "10:LOW:1:100:ten percent"
+trigger_help_output=$(printf '2\n50\nc\n11\n' | env HOME="$CASE_HOME" PATH="$TEST_BIN:$ORIGINAL_PATH" \
+    TERM=dumb TEST_POWER_SOURCE=Battery TEST_BATTERY_PERCENT=50 \
+    TEST_BATTERY_MODE=discharging TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false \
+    "$ROOT_DIR/battmon" 2>&1)
+if [[ "$trigger_help_output" == *"CHARGING ALERT — battery going up"* ]] && \
+    [[ "$trigger_help_output" == *"Speak when the battery reaches 50% while going up."* ]] && \
+    [[ "$trigger_help_output" == *"Stop voice when charging stops or you unplug the charger."* ]] && \
+    [[ "$trigger_help_output" == *"LOW-BATTERY ALERT — battery going down"* ]] && \
+    [[ "$trigger_help_output" == *"Speak when the battery reaches 50% while going down."* ]] && \
+    [[ "$trigger_help_output" == *"Stop voice when charging starts."* ]]; then
+    pass "trigger choices explain direction and stop behavior plainly"
+else
+    fail "trigger choices explain direction and stop behavior plainly"
+fi
+
+write_config "$CASE_HOME/.battmon/battery_config.sh" \
+    "80:HIGH:1:100:eighty percent" "10:LOW:1:100:ten percent"
+status_output=$(env HOME="$CASE_HOME" PATH="$TEST_BIN:$ORIGINAL_PATH" \
+    TEST_POWER_SOURCE=Battery TEST_BATTERY_PERCENT=50 TEST_BATTERY_MODE=discharging \
+    TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" status 2>&1)
+if [[ "$status_output" == *"CHARGING"* ]] && [[ "$status_output" == *"LOW-BATT"* ]] && \
+    [[ "$status_output" != *"  HIGH  "* ]]; then
+    pass "status hides internal HIGH/LOW jargon where plain labels fit"
+else
+    fail "status hides internal HIGH/LOW jargon where plain labels fit"
+fi
+
 # Installer can deploy without starting or creating legacy aliases.
 new_case
 if env HOME="$CASE_HOME" PATH="$TEST_BIN:$ORIGINAL_PATH" "$ROOT_DIR/setup.sh" --no-start >/dev/null; then

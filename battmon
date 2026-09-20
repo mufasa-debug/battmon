@@ -46,9 +46,9 @@ Commands:
   battmon migrate      Validate and safely rewrite the active config
 
 Silencing Shortcuts:
-  • Plug in or unplug your charger to stop an active alert immediately.
-  • Press MUTE (F10) on keyboard to silence alert immediately.
-  • Press VOLUME DOWN (F11) on keyboard to silence alert immediately.
+  • Charging alert: unplug the charger to stop the voice.
+  • Low-battery alert: start charging to stop the voice.
+  • Any alert: press MUTE (F10) or VOLUME DOWN (F11).
 
 Files:
   Config : ~/.battmon/battery_config.sh
@@ -244,6 +244,35 @@ prompt_number() {
     done
 }
 
+alert_type_short_name() {
+    case "$1" in
+        HIGH) printf 'CHARGING' ;;
+        LOW) printf 'LOW-BATT' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+alert_type_plain_name() {
+    case "$1" in
+        HIGH) printf 'Charging alert (battery going up)' ;;
+        LOW) printf 'Low-battery alert (battery going down)' ;;
+        *) printf '%s alert' "$1" ;;
+    esac
+}
+
+show_trigger_choices() {
+    local level="$1"
+    echo "Choose when this voice alert should play:"
+    echo ""
+    echo "   1) CHARGING ALERT — battery going up"
+    echo "      Speak when the battery reaches ${level}% while going up."
+    echo "      Stop voice when charging stops or you unplug the charger."
+    echo ""
+    echo "   2) LOW-BATTERY ALERT — battery going down"
+    echo "      Speak when the battery reaches ${level}% while going down."
+    echo "      Stop voice when charging starts."
+}
+
 show_status() {
     load_config || return 1
     local pct="N/A" pwr="Power state unavailable"
@@ -271,13 +300,15 @@ show_status() {
         printf " Config note: %s\n" "$CONFIG_WARNING"
     fi
     echo " Configured Alert Rules:"
-    printf "   %-3s %-5s %-6s %-7s %-9s %s\n" "#" "LVL" "TYPE" "REPEATS" "PAUSE" "SPOKEN MESSAGE"
+    printf "   %-3s %-5s %-9s %-7s %-9s %s\n" "#" "LVL" "ALERT" "REPEATS" "PAUSE" "SPOKEN MESSAGE"
     local idx=1
     for alert in "${ALERTS[@]}"; do
         parse_alert_entry "$alert"
+        local ui_type
+        ui_type=$(alert_type_short_name "$PARSED_TYP")
         local trunc_msg="$PARSED_MSG"
         if [ "${#trunc_msg}" -gt 34 ]; then trunc_msg="${trunc_msg:0:31}..."; fi
-        printf "  [%2d] %3d%%  %-5s  %-6s  %-7s  \"%s\"\n" "$idx" "$PARSED_LVL" "$PARSED_TYP" "${PARSED_REP}x" "${PARSED_DEL}ms" "$trunc_msg"
+        printf "  [%2d] %3d%%  %-9s %-7s %-8s \"%s\"\n" "$idx" "$PARSED_LVL" "$ui_type" "${PARSED_REP}x" "${PARSED_DEL}ms" "$trunc_msg"
         ((idx++))
     done
     echo "──────────────────────────────────────────────────────────────────────────"
@@ -294,13 +325,13 @@ edit_alert_at_index() {
     echo "Percentage: ${lvl}% (Fixed)"
     echo "──────────────────────────────────────────────────────────────────────────"
 
-    echo "1. Trigger condition:"
-    echo "   1) HIGH (triggers while charging up to ${lvl}%; stops when unplugged)"
-    echo "   2) LOW  (triggers on battery draining to ${lvl}%; stops when plugged in)"
+    echo "1. Alert type:"
+    show_trigger_choices "$lvl"
     local cur_choice=1
     if [ "$PARSED_TYP" = "LOW" ]; then cur_choice=2; fi
-    local trig_sel
-    if ! prompt_number "Enter choice [1 or 2] (Press Enter for $cur_choice, or 'c' to cancel): " 1 2 "$cur_choice" trig_sel; then
+    local trig_sel current_type_name
+    current_type_name=$(alert_type_plain_name "$PARSED_TYP")
+    if ! prompt_number "Choose 1 or 2 (Enter keeps ${current_type_name}; 'c' cancels): " 1 2 "$cur_choice" trig_sel; then
         return
     fi
     local new_typ="HIGH"
@@ -335,9 +366,11 @@ edit_alert() {
     local idx=1
     for alert in "${ALERTS[@]}"; do
         parse_alert_entry "$alert"
+        local ui_type
+        ui_type=$(alert_type_short_name "$PARSED_TYP")
         local trunc_msg="$PARSED_MSG"
         if [ "${#trunc_msg}" -gt 38 ]; then trunc_msg="${trunc_msg:0:35}..."; fi
-        printf "  [%d] %3d%% [%-4s] (%sx, %sms) -> \"%s\"\n" "$idx" "$PARSED_LVL" "$PARSED_TYP" "$PARSED_REP" "$PARSED_DEL" "$trunc_msg"
+        printf "  [%d] %3d%% [%-8s] (%sx, %sms) -> \"%s\"\n" "$idx" "$PARSED_LVL" "$ui_type" "$PARSED_REP" "$PARSED_DEL" "$trunc_msg"
         ((idx++))
     done
     echo "──────────────────────────────────────────────────────────────────────────"
@@ -377,9 +410,9 @@ add_alert() {
             echo "  Current settings for this alert:"
             for mi in "${match_indices[@]}"; do
                 parse_alert_entry "${ALERTS[$mi]}"
-                local type_desc="Charging"
-                if [ "$PARSED_TYP" = "LOW" ]; then type_desc="On Battery / Discharging"; fi
-                echo "   • Type         : ${PARSED_TYP} (${type_desc})"
+                local type_desc
+                type_desc=$(alert_type_plain_name "$PARSED_TYP")
+                echo "   • Alert type   : ${type_desc}"
                 echo "   • Spoken text  : \"${PARSED_MSG}\""
                 echo "   • Repeat count : ${PARSED_REP} times"
                 echo "   • Pause delay  : ${PARSED_DEL} ms"
@@ -418,11 +451,10 @@ add_alert() {
         fi
     done
 
-    echo "2. Trigger condition:"
-    echo "   1) HIGH (triggers while charging up to this %; stops when unplugged)"
-    echo "   2) LOW  (triggers on battery draining to this %; stops when plugged in)"
+    echo "2. Alert type:"
+    show_trigger_choices "$new_lvl"
     local trig_choice
-    if ! prompt_number "Enter choice [1 or 2] (Press Enter for 1, or 'c' to cancel): " 1 2 "1" trig_choice; then
+    if ! prompt_number "Choose 1 or 2 (Enter selects Charging alert; 'c' cancels): " 1 2 "1" trig_choice; then
         return
     fi
     local new_typ="HIGH"
@@ -452,7 +484,7 @@ add_alert() {
     else
         ALERTS+=("${new_lvl}:${new_typ}:${new_rep}:${new_del}:${new_msg}")
         save_config || return
-        echo "Added alert: ${new_lvl}% (${new_typ}) -> \"${new_msg}\""
+        echo "Added alert: ${new_lvl}% ($(alert_type_plain_name "$new_typ")) -> \"${new_msg}\""
     fi
 }
 
@@ -463,9 +495,11 @@ delete_alert() {
     local idx=1
     for alert in "${ALERTS[@]}"; do
         parse_alert_entry "$alert"
+        local ui_type
+        ui_type=$(alert_type_short_name "$PARSED_TYP")
         local trunc_msg="$PARSED_MSG"
         if [ "${#trunc_msg}" -gt 42 ]; then trunc_msg="${trunc_msg:0:39}..."; fi
-        printf "  [%d] %3d%% [%-4s] -> \"%s\"\n" "$idx" "$PARSED_LVL" "$PARSED_TYP" "$trunc_msg"
+        printf "  [%d] %3d%% [%-8s] -> \"%s\"\n" "$idx" "$PARSED_LVL" "$ui_type" "$trunc_msg"
         ((idx++))
     done
     echo "──────────────────────────────────────────────────────────────────────────"
@@ -478,7 +512,7 @@ delete_alert() {
     local deleted="${ALERTS[$target_idx]}"
     parse_alert_entry "$deleted"
     local delete_confirm
-    if ! read -r -p "Delete ${PARSED_LVL}% ${PARSED_TYP} alert \"${PARSED_MSG}\"? (y/N): " delete_confirm; then
+    if ! read -r -p "Delete ${PARSED_LVL}% $(alert_type_plain_name "$PARSED_TYP") \"${PARSED_MSG}\"? (y/N): " delete_confirm; then
         echo "Input closed; alert kept."
         return
     fi
@@ -831,7 +865,7 @@ main_menu() {
         [ "$pct" = "N/A" ] && bat_str=" Battery: Not detected"
         local vol_str=" Volume target: ${ALERT_VOLUME}%"
         printf "%-36s | Current volume: %s\n" "$bat_str" "${cur_v}"
-        printf "%-36s | Silencing: Charger or MUTE/VOL-DOWN\n" "$vol_str"
+        printf "%-36s | Stop: charger change or MUTE/DOWN\n" "$vol_str"
         echo "──────────────────────────────────────────────────────────────────────────"
         echo " Configured Alerts:"
         local idx=0
@@ -844,9 +878,11 @@ main_menu() {
                 break
             fi
             parse_alert_entry "$alert"
+            local ui_type
+            ui_type=$(alert_type_short_name "$PARSED_TYP")
             local trunc_msg="$PARSED_MSG"
             if [ "${#trunc_msg}" -gt 33 ]; then trunc_msg="${trunc_msg:0:30}..."; fi
-            printf "  • %3d%% [%-4s] %2sx %4sms \"%s\"\n" "$PARSED_LVL" "$PARSED_TYP" "$PARSED_REP" "$PARSED_DEL" "$trunc_msg"
+            printf "  • %3d%% [%-8s] %2sx %4sms \"%s\"\n" "$PARSED_LVL" "$ui_type" "$PARSED_REP" "$PARSED_DEL" "$trunc_msg"
         done
         echo "──────────────────────────────────────────────────────────────────────────"
         printf "  1) Edit an alert rule            7) Change volume target\n"
