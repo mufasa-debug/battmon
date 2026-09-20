@@ -18,6 +18,7 @@ case "$request" in
         [ "${TEST_MUSIC_STATE:-paused}" = "playing" ] && printf 'playing\n' || printf 'not-playing\n'
         ;;
     *'tell application "Spotify"'*'player state is playing'*)
+        [ "${TEST_SPOTIFY_CONTROL_FAIL:-0}" = "1" ] && exit 1
         [ "${TEST_SPOTIFY_STATE:-paused}" = "playing" ] && printf 'playing\n' || printf 'not-playing\n'
         ;;
     *'tell application "QuickTime Player"'*'playing of front document'*)
@@ -45,7 +46,10 @@ case "$request" in
     *'tell application "Brave Browser"'*'data-battmon-paused-by-daemon'*'.play()'*) log_event 'media:resume:Brave Browser' ;;
     *'tell application "Safari"'*'data-battmon-paused-by-daemon'*'.play()'*) log_event 'media:resume:Safari' ;;
     *'tell application "Music" to pause'*) log_event 'media:pause:Music' ;;
-    *'tell application "Spotify" to pause'*) log_event 'media:pause:Spotify' ;;
+    *'tell application "Spotify" to pause'*)
+        [ "${TEST_SPOTIFY_CONTROL_FAIL:-0}" = "1" ] && exit 1
+        log_event 'media:pause:Spotify'
+        ;;
     *'tell application "QuickTime Player" to pause front document'*) log_event 'media:pause:QuickTime Player' ;;
     *'tell application "Music" to play'*) log_event 'media:resume:Music' ;;
     *'tell application "Spotify" to play'*) log_event 'media:resume:Spotify' ;;

@@ -20,7 +20,8 @@ ACTIVE_ALERT_VOL=""
 USER_SILENCED=0
 MEDIA_PAUSED_APPS=()
 MEDIA_WAS_PLAYING=0
-MEDIA_CONTROL_WARNINGS=()
+MEDIA_NATIVE_WARNINGS=()
+MEDIA_BROWSER_WARNINGS=()
 MONITOR_LOCK_OWNER_PID=""
 BROWSER_PAUSE_JS='(()=>{let n=0;for(const m of document.querySelectorAll("audio,video")){if(!m.paused&&!m.ended){m.setAttribute("data-battmon-paused-by-daemon","1");m.pause();n++;}}return n;})()'
 BROWSER_RESUME_JS='(()=>{let n=0;for(const m of document.querySelectorAll("audio,video")){if(m.getAttribute("data-battmon-paused-by-daemon")==="1"){m.removeAttribute("data-battmon-paused-by-daemon");m.play().catch(()=>{});n++;}}return n;})()'
@@ -58,11 +59,17 @@ pause_scriptable_player() {
         -e 'if player state is playing then return "playing"' \
         -e 'end tell' \
         -e 'end timeout' \
-        -e 'return "not-playing"' 2>/dev/null) || return 1
+        -e 'return "not-playing"' 2>/dev/null) || {
+            MEDIA_NATIVE_WARNINGS+=("$app_name")
+            return 1
+        }
     [ "$state" = "playing" ] || return 1
     osascript -e 'with timeout of 2 seconds' \
         -e "tell application \"$app_name\" to pause" \
-        -e 'end timeout' >/dev/null 2>&1 || return 1
+        -e 'end timeout' >/dev/null 2>&1 || {
+            MEDIA_NATIVE_WARNINGS+=("$app_name")
+            return 1
+        }
     MEDIA_PAUSED_APPS+=("$app_name")
     MEDIA_WAS_PLAYING=1
     log_event "[Media] Paused $app_name"
@@ -97,17 +104,17 @@ pause_chromium_browser() {
         -e 'end tell' \
         -e 'end timeout' \
         -e 'end run' -- "$BROWSER_PAUSE_JS" 2>/dev/null) || {
-            MEDIA_CONTROL_WARNINGS+=("$app_name")
+            MEDIA_BROWSER_WARNINGS+=("$app_name")
             return 1
         }
     IFS=: read -r paused_count attempted_count error_count <<< "$result"
     [[ "$paused_count" =~ ^[0-9]+$ ]] || {
-        MEDIA_CONTROL_WARNINGS+=("$app_name")
+        MEDIA_BROWSER_WARNINGS+=("$app_name")
         return 1
     }
     if [[ "$attempted_count" =~ ^[0-9]+$ ]] && [[ "$error_count" =~ ^[0-9]+$ ]] && \
         [ "$attempted_count" -gt 0 ] && [ "$error_count" -ge "$attempted_count" ]; then
-        MEDIA_CONTROL_WARNINGS+=("$app_name")
+        MEDIA_BROWSER_WARNINGS+=("$app_name")
     fi
     [ "$paused_count" -gt 0 ] || return 1
     MEDIA_PAUSED_APPS+=("$app_name")
@@ -144,17 +151,17 @@ pause_safari_browser() {
         -e 'end tell' \
         -e 'end timeout' \
         -e 'end run' -- "$BROWSER_PAUSE_JS" 2>/dev/null) || {
-            MEDIA_CONTROL_WARNINGS+=("Safari")
+            MEDIA_BROWSER_WARNINGS+=("Safari")
             return 1
         }
     IFS=: read -r paused_count attempted_count error_count <<< "$result"
     [[ "$paused_count" =~ ^[0-9]+$ ]] || {
-        MEDIA_CONTROL_WARNINGS+=("Safari")
+        MEDIA_BROWSER_WARNINGS+=("Safari")
         return 1
     }
     if [[ "$attempted_count" =~ ^[0-9]+$ ]] && [[ "$error_count" =~ ^[0-9]+$ ]] && \
         [ "$attempted_count" -gt 0 ] && [ "$error_count" -ge "$attempted_count" ]; then
-        MEDIA_CONTROL_WARNINGS+=("Safari")
+        MEDIA_BROWSER_WARNINGS+=("Safari")
     fi
     [ "$paused_count" -gt 0 ] || return 1
     MEDIA_PAUSED_APPS+=("Safari")
@@ -212,11 +219,17 @@ pause_quicktime_player() {
         -e 'end if' \
         -e 'end tell' \
         -e 'end timeout' \
-        -e 'return "not-playing"' 2>/dev/null) || return 1
+        -e 'return "not-playing"' 2>/dev/null) || {
+            MEDIA_NATIVE_WARNINGS+=("QuickTime Player")
+            return 1
+        }
     [ "$state" = "playing" ] || return 1
     osascript -e 'with timeout of 2 seconds' \
         -e 'tell application "QuickTime Player" to pause front document' \
-        -e 'end timeout' >/dev/null 2>&1 || return 1
+        -e 'end timeout' >/dev/null 2>&1 || {
+            MEDIA_NATIVE_WARNINGS+=("QuickTime Player")
+            return 1
+        }
     MEDIA_PAUSED_APPS+=("QuickTime Player")
     MEDIA_WAS_PLAYING=1
     log_event "[Media] Paused QuickTime Player"
@@ -226,7 +239,8 @@ pause_active_media() {
     [ "${PAUSE_MEDIA:-true}" = "true" ] || return 0
     MEDIA_PAUSED_APPS=()
     MEDIA_WAS_PLAYING=0
-    MEDIA_CONTROL_WARNINGS=()
+    MEDIA_NATIVE_WARNINGS=()
+    MEDIA_BROWSER_WARNINGS=()
     pause_scriptable_player "Music" "Music" || true
     pause_scriptable_player "Spotify" "Spotify" || true
     pause_quicktime_player || true
@@ -674,11 +688,24 @@ select_trigger_rule() {
 }
 
 print_media_control_guidance() {
-    [ "${#MEDIA_CONTROL_WARNINGS[@]}" -gt 0 ] || return 0
-    printf 'Battmon could not inspect media in: %s\n' "${MEDIA_CONTROL_WARNINGS[*]}"
-    echo "For Chrome or Brave: View > Developer > Allow JavaScript from Apple Events."
-    echo "For Safari: Develop > Allow JavaScript from Apple Events."
-    echo "If macOS asks for Automation permission, choose Allow, then retry the test."
+    local controller_name="your terminal app"
+    case "${TERM_PROGRAM:-}" in
+        iTerm.app) controller_name="iTerm2" ;;
+        Apple_Terminal) controller_name="Terminal" ;;
+        WarpTerminal) controller_name="Warp" ;;
+        vscode) controller_name="Visual Studio Code" ;;
+    esac
+    if [ "${#MEDIA_NATIVE_WARNINGS[@]}" -gt 0 ]; then
+        printf 'Battmon found but could not control: %s\n' "${MEDIA_NATIVE_WARNINGS[*]}"
+        echo "Open System Settings > Privacy & Security > Automation."
+        printf 'Allow %s to control the player, then retry.\n' "$controller_name"
+    fi
+    if [ "${#MEDIA_BROWSER_WARNINGS[@]}" -gt 0 ]; then
+        printf 'Battmon could not inspect browser media in: %s\n' "${MEDIA_BROWSER_WARNINGS[*]}"
+        echo "For Chrome or Brave: View > Developer > Allow JavaScript from Apple Events."
+        echo "For Safari: Develop > Allow JavaScript from Apple Events."
+        echo "If macOS asks for Automation permission, choose Allow, then retry the test."
+    fi
 }
 
 run_media_test() {

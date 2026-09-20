@@ -596,6 +596,24 @@ else
     fail "interactive media test pauses, speaks, restores volume, and resumes"
 fi
 
+# Native-player permission failures name the player and explain macOS Automation access.
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "10:LOW:1:100:ten percent"
+spotify_help_output=$(printf '8\n5\n\n\n11\n' | env HOME="$CASE_HOME" \
+    PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TERM_PROGRAM=iTerm.app TEST_POWER_SOURCE=Battery \
+    TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
+    TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false TEST_SAY_LOG="$SAY_LOG" \
+    TEST_EVENT_LOG="$EVENT_LOG" TEST_RUNNING_MEDIA_APPS=Spotify \
+    TEST_SPOTIFY_STATE=playing TEST_SPOTIFY_CONTROL_FAIL=1 "$ROOT_DIR/battmon" 2>&1)
+if [[ "$spotify_help_output" == *"Battmon found but could not control: Spotify"* ]] && \
+    [[ "$spotify_help_output" == *"System Settings > Privacy & Security > Automation"* ]] && \
+    [[ "$spotify_help_output" == *"Allow iTerm2 to control the player"* ]] && \
+    [ ! -s "$SAY_LOG" ]; then
+    pass "Spotify permission failure gives actionable Automation recovery"
+else
+    fail "Spotify permission failure gives actionable Automation recovery"
+fi
+
 # Browser permission failures explain the exact recovery step.
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" "10:LOW:1:100:ten percent"
@@ -605,7 +623,7 @@ browser_help_output=$(printf '8\n5\n\n\n11\n' | env HOME="$CASE_HOME" \
     TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false TEST_SAY_LOG="$SAY_LOG" \
     TEST_EVENT_LOG="$EVENT_LOG" TEST_RUNNING_MEDIA_APPS='Google Chrome' \
     TEST_CHROME_CONTROL_FAIL=1 "$ROOT_DIR/battmon" 2>&1)
-if [[ "$browser_help_output" == *"Battmon could not inspect media in: Google Chrome"* ]] && \
+if [[ "$browser_help_output" == *"Battmon could not inspect browser media in: Google Chrome"* ]] && \
     [[ "$browser_help_output" == *"View > Developer > Allow JavaScript from Apple Events"* ]] && \
     [ ! -s "$SAY_LOG" ]; then
     pass "media test gives actionable browser permission recovery"

@@ -67,7 +67,7 @@ The default pause is **100 ms**. Values from **50 ms through 60,000 ms** are acc
 - Duplicate percentage/type messages are merged deterministically so no phrase silently becomes unreachable.
 - **Until stopped** alerts repeat until Mute, Volume Down, or the appropriate charger action is detected.
 
-The interactive **Test voice & silencing keys** screen includes a media test. Start playback in a supported player or browser tab and choose the test; Battmon pauses it, speaks once, restores the original system volume and mute state, and resumes exactly what it paused. If macOS shows an Automation permission prompt the first time, choose **Allow**.
+The interactive **Test voice & silencing keys** screen includes a media test. Start playback in a supported player or browser tab and choose the test; Battmon pauses it, speaks once, restores the original system volume and mute state, and resumes exactly what it paused. If macOS shows an Automation permission prompt the first time, choose **Allow**. If a playing native app is detected but cannot be controlled, open **System Settings → Privacy & Security → Automation** and allow the terminal app running Battmon (for example, iTerm2) to control that player.
 
 ## Safe uninstall
 
