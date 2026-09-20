@@ -1,0 +1,9 @@
+#!/bin/bash
+
+if [ "${TEST_SESSION_STATE_UNKNOWN:-0}" = "1" ]; then
+    exit 1
+elif [ "${TEST_SESSION_LOCKED:-0}" = "1" ]; then
+    printf '%s\n' '    "IOConsoleUsers" = ({"CGSSessionScreenIsLocked"=Yes})'
+else
+    printf '%s\n' '    "IOConsoleUsers" = ({"kCGSessionLoginDoneKey"=Yes})'
+fi

@@ -16,6 +16,7 @@ flowchart TD
     COMMON --> PMSET["pmset battery state"]
     COMMON --> AUDIO["osascript volume and mute"]
     MONITOR --> SAY["say speech process"]
+    MONITOR --> MEDIA["Music, Spotify, and QuickTime Player"]
 ```
 
 ### Files
@@ -42,7 +43,7 @@ LEVEL:TYPE:REPEAT_COUNT:PAUSE_DELAY_MS:MESSAGE
 
 - Level: 1–100
 - Type: `LOW` or `HIGH`
-- Repeats: 1–100
+- Repeats: 1–100 for fixed mode; `0` means repeat until interrupted
 - Pause: 50–60,000 ms; default 100 ms
 - Message: non-empty text; `{percent}`, `{level}`, and `{pct}` interpolate live battery percentage
 
@@ -66,6 +67,12 @@ Trigger selection supports:
 
 Only the selected rule is announced. State is persisted before speech begins so overlapping manual/LaunchAgent checks cannot repeat the same alert.
 
+## Locked-session and cold-boot suppression
+
+Before selecting a rule, the monitor checks the current GUI session through `ioreg`. While `CGSSessionScreenIsLocked` is true, no alert is spoken. It also reads `kern.boottime` through `sysctl` and stays silent for `STARTUP_GRACE_SECONDS` (default 300 seconds) after a cold boot.
+
+Suppression is persisted in `LAST_SESSION_BLOCKED`. On the first active check after the lock or startup quiet period ends, Battmon records the current percentage, power direction, and any exact matching rule as a silent baseline. This prevents the same 1% rule from firing one minute after unlock while allowing it to re-arm normally after the battery leaves that percentage.
+
 ## State and locks
 
 State is atomically stored in `~/.battmon/state`:
@@ -76,6 +83,7 @@ LAST_ALERT_LEVEL=13
 LAST_ALERT_TYPE=LOW
 LAST_MODE=discharging
 LAST_SOURCE=BATTERY
+LAST_SESSION_BLOCKED=0
 ```
 
 The monitor lock and configuration lock live under the owner-only `~/.battmon` directory. Stale locks are reclaimed only when their recorded process is no longer the corresponding Battmon process.
@@ -95,13 +103,30 @@ Cutoffs include:
 
 Signal handlers exit with conventional status codes. The EXIT cleanup stops the speech child, restores audio unless the user deliberately changed it, and releases the monitor lock.
 
+For an unlimited rule (`REPEAT_COUNT=0`), the same loop continues without a numeric limit. The charger, Mute, Volume Down, and signal checks remain active during speech and between repetitions.
+
+### Media pause and restoration
+
+`PAUSE_MEDIA=true` enables explicit control of Apple Music, Spotify, and the front playing document in QuickTime Player. Before speech, the monitor:
+
+1. Uses `pgrep -x` so an inactive application is never launched just to inspect it.
+2. Asks each running application whether it is currently playing.
+3. Pauses it and records it only when the pause command succeeds.
+4. Snapshots and prepares system audio, then speaks the alert.
+
+Cleanup stops speech, restores the original volume and mute state, and only then resumes the recorded players. A player that was paused beforehand is never resumed, and an application closed during the alert is not relaunched. If media was paused, the original audio state is restored even when Volume Down or Mute caused the interruption; otherwise, a deliberate user audio change is preserved as before.
+
+Battmon does not synthesize a global media key. That would require Accessibility permission, could control the wrong application, and could resume media Battmon did not pause. Browser tabs and other unsupported players are therefore left unchanged.
+
+The TUI media test invokes the same production `--test-media` path as real alerts. It takes the monitor lock, verifies a supported player is actively playing, pauses it, speaks one test sentence, restores audio, and resumes only the recorded player. Apple events have a two-second timeout so a stuck media application cannot indefinitely block an alert or cleanup.
+
 If the original audio state cannot be read, Battmon speaks without changing volume. It never invents a fallback volume that could later overwrite the user's real setting.
 
 ## Installation lifecycle
 
 `setup.sh` performs these steps:
 
-1. Verify macOS and required built-in commands.
+1. Verify macOS and required built-in commands, including `ioreg`, `sysctl`, and `pgrep`.
 2. Syntax-check every installed shell file.
 3. Refuse to overwrite an unrelated `~/.local/bin/battmon` command.
 4. Back up the active configuration.
@@ -136,4 +161,4 @@ Run:
 ./tests/run_tests.sh
 ```
 
-The suite prepends deterministic stubs for `pmset`, `osascript`, `say`, `sleep`, and `launchctl`. It does not speak, change volume, or load a real service. Covered workflows include exact triggers, debounce, multi-threshold jumps, AC-attached discharging, charging suppression, duplicate normalization, shell-safe messages, stale-manager collision rejection, read-only help, unknown commands, and no-start installation.
+The suite prepends deterministic stubs for `pmset`, `osascript`, `pgrep`, `ioreg`, `sysctl`, `say`, `sleep`, and `launchctl`. It does not speak, change volume, control real media, or load a real service. Covered workflows include exact triggers, debounce, locked-session and cold-boot suppression, post-unlock re-arming, multi-threshold jumps, AC-attached discharging, charging suppression, unlimited-repeat interruption, ordered media pause/restore/resume, the interactive media test, already-paused media safety, disabled media control, duplicate normalization, shell-safe messages, stale-manager collision rejection, read-only help, unknown commands, and no-start installation.

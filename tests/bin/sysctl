@@ -1,0 +1,9 @@
+#!/bin/bash
+
+if [ "${1:-}" = "-n" ] && [ "${2:-}" = "kern.boottime" ]; then
+    now=$(date +%s)
+    uptime_seconds="${TEST_SYSTEM_UPTIME_SECONDS:-86400}"
+    printf '{ sec = %s, usec = 0 }\n' "$((now - uptime_seconds))"
+    exit 0
+fi
+exit 1

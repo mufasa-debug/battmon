@@ -1,8 +1,38 @@
 #!/bin/bash
-case "$*" in
+
+request="$*"
+log_event() {
+    [ -n "${TEST_EVENT_LOG:-}" ] && printf '%s\n' "$1" >> "$TEST_EVENT_LOG"
+}
+
+case "$request" in
     *"get {output volume, output muted}"*)
         [ "${TEST_AUDIO_FAIL:-0}" = "1" ] && exit 1
-        printf '%s, %s\n' "${TEST_AUDIO_VOLUME:-80}" "${TEST_AUDIO_MUTED:-false}"
+        if [ -n "${TEST_INTERRUPT_FLAG:-}" ] && [ -f "$TEST_INTERRUPT_FLAG" ]; then
+            printf '%s, %s\n' "${TEST_INTERRUPTED_AUDIO_VOLUME:-70}" "${TEST_INTERRUPTED_AUDIO_MUTED:-false}"
+        else
+            printf '%s, %s\n' "${TEST_AUDIO_VOLUME:-80}" "${TEST_AUDIO_MUTED:-false}"
+        fi
         ;;
+    *'tell application "Music"'*'player state is playing'*)
+        [ "${TEST_MUSIC_STATE:-paused}" = "playing" ] && printf 'playing\n' || printf 'not-playing\n'
+        ;;
+    *'tell application "Spotify"'*'player state is playing'*)
+        [ "${TEST_SPOTIFY_STATE:-paused}" = "playing" ] && printf 'playing\n' || printf 'not-playing\n'
+        ;;
+    *'tell application "QuickTime Player"'*'playing of front document'*)
+        [ "${TEST_QUICKTIME_STATE:-paused}" = "playing" ] && printf 'playing\n' || printf 'not-playing\n'
+        ;;
+    *'tell application "Music" to pause'*) log_event 'media:pause:Music' ;;
+    *'tell application "Spotify" to pause'*) log_event 'media:pause:Spotify' ;;
+    *'tell application "QuickTime Player" to pause front document'*) log_event 'media:pause:QuickTime Player' ;;
+    *'tell application "Music" to play'*) log_event 'media:resume:Music' ;;
+    *'tell application "Spotify" to play'*) log_event 'media:resume:Spotify' ;;
+    *'tell application "QuickTime Player" to play front document'*) log_event 'media:resume:QuickTime Player' ;;
+    *'set volume output volume '*' with output muted'|*'set volume output volume '*' without output muted')
+        log_event 'audio:restore'
+        ;;
+    *'set volume output volume '*) log_event 'audio:set-volume' ;;
+    *'set volume output muted '*) log_event 'audio:set-mute' ;;
     *) exit 0 ;;
 esac

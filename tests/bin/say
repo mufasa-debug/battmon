@@ -2,4 +2,14 @@
 if [ -n "${TEST_SAY_LOG:-}" ]; then
     printf '%s\n' "$*" >> "$TEST_SAY_LOG"
 fi
+if [ -n "${TEST_EVENT_LOG:-}" ]; then
+    printf 'say:%s\n' "$*" >> "$TEST_EVENT_LOG"
+fi
+if [[ "${TEST_INTERRUPT_AFTER_SAYS:-0}" =~ ^[0-9]+$ ]] && \
+    [ "${TEST_INTERRUPT_AFTER_SAYS:-0}" -gt 0 ] && \
+    [ -n "${TEST_SAY_LOG:-}" ] && \
+    [ "$(wc -l < "$TEST_SAY_LOG" | tr -d ' ')" -ge "$TEST_INTERRUPT_AFTER_SAYS" ] && \
+    [ -n "${TEST_INTERRUPT_FLAG:-}" ]; then
+    : > "$TEST_INTERRUPT_FLAG"
+fi
 exit 0

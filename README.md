@@ -1,6 +1,8 @@
 # Battmon
 
-Battmon is a macOS battery voice-alert service with an 80×24 terminal manager. It watches charging and discharging thresholds, speaks configured messages, and can be interrupted immediately with a charger transition, Mute, or Volume Down.
+Battmon is a macOS battery voice-alert service with an 80×24 terminal manager. It watches charging and discharging thresholds, speaks configured messages, and can be interrupted immediately with a charger transition, Mute, or Volume Down. An alert can use a fixed repeat count or keep speaking until you interrupt it.
+
+When enabled, Battmon safely pauses playing audio in Apple Music, Spotify, and QuickTime Player before speaking. After the alert, it restores the original system volume and mute state, then resumes only the players that Battmon successfully paused. Already-paused or closed players stay untouched.
 
 Each main-menu refresh uses the terminal's native clear behavior followed by an ANSI fallback, so prior command and submenu output does not remain visible above the dashboard. In iTerm2, Battmon also sends iTerm2's native `ClearScrollback` command.
 
@@ -50,7 +52,11 @@ Alert format:
 PERCENT:TYPE:REPEATS:PAUSE_MS:MESSAGE
 ```
 
-The default pause is **100 ms**. Values from **50 ms through 60,000 ms** are accepted.
+The default pause is **100 ms**. Values from **50 ms through 60,000 ms** are accepted. A repeat value of `0` means **Until stopped**; fixed repeat values are `1` through `100`.
+
+`PAUSE_MEDIA=true` enables pause/speak/restore/resume behavior for Apple Music, Spotify, and QuickTime Player. It can be changed in the interactive **Audio & media settings** screen. Battmon deliberately does not send a blind global Play/Pause key, so browser tabs and unsupported players are not accidentally changed.
+
+`STARTUP_GRACE_SECONDS=300` keeps Battmon silent for the first five minutes after a cold boot. Battmon also suppresses alerts for the entire time the macOS session is locked, then records the current battery state as a quiet baseline when the session becomes active. This prevents a 1% alert from speaking while a powered-off Mac is first connected to a charger or before the owner unlocks it.
 
 ## Power behavior
 
@@ -59,6 +65,9 @@ The default pause is **100 ms**. Values from **50 ms through 60,000 ms** are acc
 - Low-battery alerts use the battery's real direction, including the unusual case where an adapter is attached but the battery is still going down.
 - If several thresholds are crossed between checks, Battmon selects the most relevant critical threshold instead of losing all of them.
 - Duplicate percentage/type messages are merged deterministically so no phrase silently becomes unreachable.
+- **Until stopped** alerts repeat until Mute, Volume Down, or the appropriate charger action is detected.
+
+The interactive **Test voice & silencing keys** screen includes a media test. Start playback in a supported player and choose the test; Battmon pauses it, speaks once, restores the original system volume and mute state, and resumes the same player. If macOS shows an Automation permission prompt the first time, choose **Allow**.
 
 ## Safe uninstall
 

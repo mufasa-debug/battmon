@@ -18,6 +18,8 @@ ORIG_VOL=""
 ORIG_MUTED=""
 ACTIVE_ALERT_VOL=""
 USER_SILENCED=0
+MEDIA_PAUSED_APPS=()
+MEDIA_WAS_PLAYING=0
 
 release_monitor_lock() {
     [ "$LOCK_HELD" -eq 1 ] || return 0
@@ -27,13 +29,97 @@ release_monitor_lock() {
 }
 
 restore_audio() {
-    [ "$AUDIO_MODIFIED" -eq 1 ] || return 0
+    if [ "$AUDIO_MODIFIED" -ne 1 ] && [ "$MEDIA_WAS_PLAYING" -ne 1 ]; then
+        return 0
+    fi
+    [ -n "$ORIG_VOL" ] && [ -n "$ORIG_MUTED" ] || return 0
     if restore_sys_audio "$ORIG_VOL" "$ORIG_MUTED"; then
         log_event "[Audio] Restored volume=${ORIG_VOL} muted=${ORIG_MUTED}"
     else
         log_event "[Warning] Could not restore audio state"
     fi
     AUDIO_MODIFIED=0
+}
+
+media_app_running() {
+    pgrep -x "$1" >/dev/null 2>&1
+}
+
+pause_scriptable_player() {
+    local process_name="$1" app_name="$2" state
+    media_app_running "$process_name" || return 1
+    state=$(osascript \
+        -e 'with timeout of 2 seconds' \
+        -e "tell application \"$app_name\"" \
+        -e 'if player state is playing then return "playing"' \
+        -e 'end tell' \
+        -e 'end timeout' \
+        -e 'return "not-playing"' 2>/dev/null) || return 1
+    [ "$state" = "playing" ] || return 1
+    osascript -e 'with timeout of 2 seconds' \
+        -e "tell application \"$app_name\" to pause" \
+        -e 'end timeout' >/dev/null 2>&1 || return 1
+    MEDIA_PAUSED_APPS+=("$app_name")
+    MEDIA_WAS_PLAYING=1
+    log_event "[Media] Paused $app_name"
+}
+
+pause_quicktime_player() {
+    local state
+    media_app_running "QuickTime Player" || return 1
+    state=$(osascript \
+        -e 'with timeout of 2 seconds' \
+        -e 'tell application "QuickTime Player"' \
+        -e 'if (count documents) > 0 then' \
+        -e 'if playing of front document then return "playing"' \
+        -e 'end if' \
+        -e 'end tell' \
+        -e 'end timeout' \
+        -e 'return "not-playing"' 2>/dev/null) || return 1
+    [ "$state" = "playing" ] || return 1
+    osascript -e 'with timeout of 2 seconds' \
+        -e 'tell application "QuickTime Player" to pause front document' \
+        -e 'end timeout' >/dev/null 2>&1 || return 1
+    MEDIA_PAUSED_APPS+=("QuickTime Player")
+    MEDIA_WAS_PLAYING=1
+    log_event "[Media] Paused QuickTime Player"
+}
+
+pause_active_media() {
+    [ "${PAUSE_MEDIA:-true}" = "true" ] || return 0
+    MEDIA_PAUSED_APPS=()
+    MEDIA_WAS_PLAYING=0
+    pause_scriptable_player "Music" "Music" || true
+    pause_scriptable_player "Spotify" "Spotify" || true
+    pause_quicktime_player || true
+}
+
+resume_paused_media() {
+    local app
+    [ "${#MEDIA_PAUSED_APPS[@]}" -gt 0 ] || return 0
+    for app in "${MEDIA_PAUSED_APPS[@]}"; do
+        if ! media_app_running "$app"; then
+            log_event "[Media] Did not resume $app because it is no longer running"
+            continue
+        fi
+        if [ "$app" = "QuickTime Player" ]; then
+            if osascript -e 'with timeout of 2 seconds' \
+                -e 'tell application "QuickTime Player" to play front document' \
+                -e 'end timeout' >/dev/null 2>&1; then
+                log_event "[Media] Resumed QuickTime Player"
+            else
+                log_event "[Warning] Could not resume QuickTime Player"
+            fi
+        elif osascript -e 'with timeout of 2 seconds' \
+            -e "tell application \"$app\" to play" \
+            -e 'end timeout' >/dev/null 2>&1; then
+            log_event "[Media] Resumed $app"
+        else
+            log_event "[Warning] Could not resume $app"
+        fi
+    done
+    MEDIA_PAUSED_APPS=()
+    MEDIA_WAS_PLAYING=0
 }
 
 stop_speech() {
@@ -46,9 +132,10 @@ stop_speech() {
 
 cleanup() {
     stop_speech
-    if [ "$USER_SILENCED" -eq 0 ]; then
+    if [ "$USER_SILENCED" -eq 0 ] || [ "$MEDIA_WAS_PLAYING" -eq 1 ]; then
         restore_audio
     fi
+    resume_paused_media
     release_monitor_lock
 }
 
@@ -86,6 +173,7 @@ LAST_ALERT_LEVEL=""
 LAST_ALERT_TYPE=""
 LAST_MODE=""
 LAST_SOURCE=""
+LAST_SESSION_BLOCKED=0
 
 load_state() {
     [ -f "$BATTMON_STATE_FILE" ] || return 0
@@ -103,6 +191,7 @@ load_state() {
             LAST_ALERT_TYPE) LAST_ALERT_TYPE="$value" ;;
             LAST_MODE) LAST_MODE="$value" ;;
             LAST_SOURCE) LAST_SOURCE="$value" ;;
+            LAST_SESSION_BLOCKED) LAST_SESSION_BLOCKED="$value" ;;
         esac
     done < "$BATTMON_STATE_FILE"
 
@@ -111,10 +200,12 @@ load_state() {
     case "$LAST_ALERT_TYPE" in LOW|HIGH|"") ;; *) LAST_ALERT_TYPE="" ;; esac
     case "$LAST_MODE" in charging|charged|discharging|unknown|"") ;; *) LAST_MODE="" ;; esac
     case "$LAST_SOURCE" in AC|BATTERY|UNKNOWN|"") ;; *) LAST_SOURCE="" ;; esac
+    case "$LAST_SESSION_BLOCKED" in 0|1) ;; *) LAST_SESSION_BLOCKED=0 ;; esac
 }
 
 write_state() {
-    local percent="$1" level="$2" type="$3" mode="$4" source="$5" temp_file
+    local percent="$1" level="$2" type="$3" mode="$4" source="$5"
+    local session_blocked="${6:-0}" temp_file
     temp_file=$(mktemp "$BATTMON_RUNTIME_DIR/.state.XXXXXX") || return 1
     {
         printf 'LAST_PERCENT=%s\n' "$percent"
@@ -122,12 +213,76 @@ write_state() {
         printf 'LAST_ALERT_TYPE=%s\n' "$type"
         printf 'LAST_MODE=%s\n' "$mode"
         printf 'LAST_SOURCE=%s\n' "$source"
+        printf 'LAST_SESSION_BLOCKED=%s\n' "$session_blocked"
     } > "$temp_file" || {
         rm -f "$temp_file"
         return 1
     }
     chmod 600 "$temp_file" 2>/dev/null || true
     mv -f "$temp_file" "$BATTMON_STATE_FILE"
+}
+
+session_lock_state() {
+    local session_info
+    session_info=$(ioreg -l -w 0 -d 1 -c IOResources 2>/dev/null) || {
+        printf 'unknown'
+        return 0
+    }
+    session_info="${session_info//[[:space:]]/}"
+    case "$session_info" in
+        *'"CGSSessionScreenIsLocked"=Yes'*|*'"CGSSessionScreenIsLocked"=true'*|*'"CGSSessionScreenIsLocked"=1'*) printf 'locked' ;;
+        *'"IOConsoleUsers"='*'"kCGSessionLoginDoneKey"=Yes'*) printf 'unlocked' ;;
+        *) printf 'unknown' ;;
+    esac
+}
+
+system_uptime_seconds() {
+    local boot_info boot_epoch now
+    boot_info=$(sysctl -n kern.boottime 2>/dev/null) || return 1
+    if [[ "$boot_info" =~ sec[[:space:]]*=[[:space:]]*([0-9]+) ]]; then
+        boot_epoch="${BASH_REMATCH[1]}"
+    else
+        return 1
+    fi
+    now=$(date +%s)
+    [ "$now" -ge "$boot_epoch" ] || return 1
+    printf '%s\n' "$((now - boot_epoch))"
+}
+
+session_suppression_reason() {
+    local uptime_seconds lock_state
+    lock_state=$(session_lock_state)
+    if [ "$lock_state" = "locked" ]; then
+        printf 'the macOS session is locked'
+        return 0
+    fi
+    if [ "$lock_state" = "unknown" ]; then
+        printf 'the macOS login or lock state is not safely available'
+        return 0
+    fi
+    if [ "${STARTUP_GRACE_SECONDS:-300}" -gt 0 ]; then
+        uptime_seconds=$(system_uptime_seconds) || uptime_seconds=""
+        if [[ "$uptime_seconds" =~ ^[0-9]+$ ]] && \
+            [ "$uptime_seconds" -lt "$STARTUP_GRACE_SECONDS" ]; then
+            printf 'the Mac is still in its %s-second startup quiet period' "$STARTUP_GRACE_SECONDS"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+baseline_current_state() {
+    local alert baseline_level="" baseline_type=""
+    for alert in "${ALERTS[@]}"; do
+        parse_alert_entry "$alert"
+        if [ "$PARSED_LVL" = "$BATTERY_PERCENT" ] && rule_applies_to_mode "$PARSED_TYP"; then
+            baseline_level="$PARSED_LVL"
+            baseline_type="$PARSED_TYP"
+            break
+        fi
+    done
+    write_state "$BATTERY_PERCENT" "$baseline_level" "$baseline_type" \
+        "$BATTERY_MODE" "$BATTERY_SOURCE" 0
 }
 
 prepare_audio() {
@@ -166,13 +321,13 @@ check_user_silenced_audio() {
 
     if [ "$current_muted" = "true" ]; then
         USER_SILENCED=1
-        AUDIO_MODIFIED=0
+        [ "$MEDIA_WAS_PLAYING" -eq 1 ] || AUDIO_MODIFIED=0
         INTERRUPT_REASON="Mute key"
         return 0
     fi
     if [ "$current_volume" -lt "$ACTIVE_ALERT_VOL" ]; then
         USER_SILENCED=1
-        AUDIO_MODIFIED=0
+        [ "$MEDIA_WAS_PLAYING" -eq 1 ] || AUDIO_MODIFIED=0
         INTERRUPT_REASON="Volume Down (${current_volume}%)"
         return 0
     fi
@@ -215,11 +370,16 @@ speak_rule() {
     poll_ms="$CHECK_INTERVAL_MS"
     poll_seconds=$(awk -v ms="$poll_ms" 'BEGIN { printf "%.3f", ms / 1000 }')
 
+    pause_active_media
     prepare_audio
-    log_event "[Alert Started] Rule ${rule_level}% ${type}; ${repeat_count} repeats; ${delay_ms}ms pause"
+    if [ "$repeat_count" -eq 0 ]; then
+        log_event "[Alert Started] Rule ${rule_level}% ${type}; until interrupted; ${delay_ms}ms pause"
+    else
+        log_event "[Alert Started] Rule ${rule_level}% ${type}; ${repeat_count} repeats; ${delay_ms}ms pause"
+    fi
 
     repetition=1
-    while [ "$repetition" -le "$repeat_count" ]; do
+    while [ "$repeat_count" -eq 0 ] || [ "$repetition" -le "$repeat_count" ]; do
         if get_battery_state && power_should_cutoff "$type" "$start_source"; then
             log_event "[Alert Cutoff] $INTERRUPT_REASON before repetition $repetition"
             return 2
@@ -230,7 +390,11 @@ speak_rule() {
         fi
 
         spoken_message=$(format_speech_message "$message" "$rule_level" "${BATTERY_PERCENT:-$rule_level}")
-        log_event "[Repetition ${repetition}/${repeat_count}] Battery ${BATTERY_PERCENT:-unknown}%"
+        if [ "$repeat_count" -eq 0 ]; then
+            log_event "[Repetition ${repetition}/unlimited] Battery ${BATTERY_PERCENT:-unknown}%"
+        else
+            log_event "[Repetition ${repetition}/${repeat_count}] Battery ${BATTERY_PERCENT:-unknown}%"
+        fi
         say "$spoken_message" &
         SAY_PID=$!
 
@@ -246,7 +410,8 @@ speak_rule() {
         SAY_PID=""
 
         pause_elapsed=0
-        while [ "$pause_elapsed" -lt "$delay_ms" ] && [ "$repetition" -lt "$repeat_count" ]; do
+        while [ "$pause_elapsed" -lt "$delay_ms" ] && \
+            { [ "$repeat_count" -eq 0 ] || [ "$repetition" -lt "$repeat_count" ]; }; do
             if poll_for_interrupt "$type" "$start_source"; then
                 log_event "[Alert Cutoff] $INTERRUPT_REASON after repetition $repetition"
                 return 2
@@ -341,8 +506,58 @@ select_trigger_rule() {
     [ -n "$SELECTED_ALERT" ]
 }
 
+run_media_test() {
+    local lock_result speech_result test_message
+    acquire_monitor_lock
+    lock_result=$?
+    if [ "$lock_result" -eq 2 ]; then
+        echo "A battery alert is already running. Try the media test again shortly."
+        return 2
+    elif [ "$lock_result" -ne 0 ]; then
+        echo "Battmon could not start the media test."
+        return 1
+    fi
+
+    load_config || {
+        echo "Battmon could not load its settings."
+        return 1
+    }
+    if [ "${PAUSE_MEDIA:-true}" != "true" ]; then
+        echo "Media pausing is turned off. Enable it in Audio & media settings first."
+        return 3
+    fi
+
+    pause_active_media
+    if [ "$MEDIA_WAS_PLAYING" -ne 1 ]; then
+        echo "No playing Apple Music, Spotify, or QuickTime Player media was found."
+        echo "Start playback in one of those apps, then run this test again."
+        return 3
+    fi
+
+    prepare_audio
+    printf 'Paused: %s\n' "${MEDIA_PAUSED_APPS[*]}"
+    echo "Speaking the test message now..."
+    test_message="Battmon media test. Your music will resume now."
+    log_event "[Media Test] Started for ${MEDIA_PAUSED_APPS[*]}"
+    say "$test_message" &
+    SAY_PID=$!
+    wait "$SAY_PID"
+    speech_result=$?
+    SAY_PID=""
+
+    restore_audio
+    resume_paused_media
+    release_monitor_lock
+    if [ "$speech_result" -eq 0 ]; then
+        echo "Media test complete. Original volume restored and playback resumed."
+    else
+        echo "The test voice failed, but Battmon still restored your media."
+    fi
+    return "$speech_result"
+}
+
 main() {
-    local lock_result speech_result
+    local lock_result speech_result suppression_reason
     acquire_monitor_lock
     lock_result=$?
     if [ "$lock_result" -eq 2 ]; then
@@ -365,6 +580,18 @@ main() {
 
     if ! get_battery_state; then
         log_event "[Warning] No supported battery was detected"
+        exit 0
+    fi
+
+    if suppression_reason=$(session_suppression_reason); then
+        write_state "$BATTERY_PERCENT" "" "" "$BATTERY_MODE" "$BATTERY_SOURCE" 1 || \
+            log_event "[Warning] Could not persist quiet-session state"
+        log_event "[Alert Suppressed] $suppression_reason"
+        exit 0
+    fi
+    if [ "$LAST_SESSION_BLOCKED" -eq 1 ]; then
+        baseline_current_state || log_event "[Warning] Could not persist post-unlock baseline"
+        log_event "[Alert Suppressed] Session is active again; current battery state was used as a quiet baseline"
         exit 0
     fi
 
@@ -391,5 +618,10 @@ main() {
     [ "$speech_result" -eq 2 ] && return 0
     return "$speech_result"
 }
+
+if [ "${1:-}" = "--test-media" ]; then
+    run_media_test
+    exit $?
+fi
 
 main "$@"

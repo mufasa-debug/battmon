@@ -1,0 +1,7 @@
+#!/bin/bash
+
+process_name="${2:-${1:-}}"
+case ",${TEST_RUNNING_MEDIA_APPS:-}," in
+    *",${process_name},"*) exit 0 ;;
+    *) exit 1 ;;
+esac

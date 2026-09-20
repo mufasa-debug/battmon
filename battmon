@@ -49,6 +49,7 @@ Silencing Shortcuts:
   • Charging alert: unplug the charger to stop the voice.
   • Low-battery alert: start charging to stop the voice.
   • Any alert: press MUTE (F10) or VOLUME DOWN (F11).
+  • Alerts stay silent while macOS is locked and just after a cold boot.
 
 Files:
   Config : ~/.battmon/battery_config.sh
@@ -260,17 +261,58 @@ alert_type_plain_name() {
     esac
 }
 
+repeat_display() {
+    if [ "$1" = "0" ]; then
+        printf 'Until stopped'
+    else
+        printf '%sx' "$1"
+    fi
+}
+
+repeat_compact_display() {
+    if [ "$1" = "0" ]; then
+        printf '∞'
+    else
+        printf '%sx' "$1"
+    fi
+}
+
 show_trigger_choices() {
     local level="$1"
     echo "Choose when this voice alert should play:"
     echo ""
-    echo "   1) CHARGING ALERT — battery going up"
-    echo "      Speak when the battery reaches ${level}% while going up."
-    echo "      Stop voice when charging stops or you unplug the charger."
+    echo "   1) CHARGING ALERT"
+    echo "      Use this while the battery is filling up."
+    echo "      Starts at ${level}%. Unplug the charger to stop the voice."
     echo ""
-    echo "   2) LOW-BATTERY ALERT — battery going down"
-    echo "      Speak when the battery reaches ${level}% while going down."
-    echo "      Stop voice when charging starts."
+    echo "   2) LOW-BATTERY ALERT"
+    echo "      Use this while the battery is running down."
+    echo "      Starts at ${level}%. Plug in the charger to stop the voice."
+}
+
+prompt_repeat_behavior() {
+    local current_repeat="$1" alert_type="$2" result_var="$3"
+    local default_choice=1 choice fixed_default stop_action
+    [ "$current_repeat" = "0" ] && default_choice=2
+    fixed_default="$current_repeat"
+    [ "$fixed_default" = "0" ] && fixed_default="${REPEAT_COUNT:-10}"
+    if [ "$alert_type" = "LOW" ]; then
+        stop_action="plug in the charger"
+    else
+        stop_action="unplug the charger"
+    fi
+
+    echo "   1) Fixed number — speak a set number of times"
+    echo "   2) Until stopped — keep speaking until you stop it"
+    echo "      Stop with Mute, Volume Down, or $stop_action."
+    if ! prompt_number "Choose 1 or 2 (Enter keeps the current choice; 'c' cancels): " 1 2 "$default_choice" choice; then
+        return 1
+    fi
+    if [ "$choice" = "2" ]; then
+        eval "$result_var=0"
+        return 0
+    fi
+    prompt_number "How many times? [1-100] (Press Enter for ${fixed_default}, or 'c' to cancel): " 1 100 "$fixed_default" "$result_var"
 }
 
 show_status() {
@@ -294,21 +336,23 @@ show_status() {
     fi
     printf " Current system volume : %s\n" "$cur_vol"
     printf " Volume target         : %s%%\n" "$ALERT_VOLUME"
+    printf " Pause playing media   : %s\n" "$([ "$PAUSE_MEDIA" = true ] && echo On || echo Off)"
+    printf " Startup quiet period  : %s seconds\n" "$STARTUP_GRACE_SECONDS"
     printf " Background service    : %s\n" "$(is_service_running && echo Running || echo Stopped)"
     echo "──────────────────────────────────────────────────────────────────────────"
     if [ -n "$CONFIG_WARNING" ]; then
         printf " Config note: %s\n" "$CONFIG_WARNING"
     fi
     echo " Configured Alert Rules:"
-    printf "   %-3s %-5s %-9s %-7s %-9s %s\n" "#" "LVL" "ALERT" "REPEATS" "PAUSE" "SPOKEN MESSAGE"
+    printf "   %-3s %-5s %-9s %-13s %-9s %s\n" "#" "LVL" "ALERT" "REPEATS" "PAUSE" "SPOKEN MESSAGE"
     local idx=1
     for alert in "${ALERTS[@]}"; do
         parse_alert_entry "$alert"
         local ui_type
         ui_type=$(alert_type_short_name "$PARSED_TYP")
         local trunc_msg="$PARSED_MSG"
-        if [ "${#trunc_msg}" -gt 34 ]; then trunc_msg="${trunc_msg:0:31}..."; fi
-        printf "  [%2d] %3d%%  %-9s %-7s %-8s \"%s\"\n" "$idx" "$PARSED_LVL" "$ui_type" "${PARSED_REP}x" "${PARSED_DEL}ms" "$trunc_msg"
+        if [ "${#trunc_msg}" -gt 28 ]; then trunc_msg="${trunc_msg:0:25}..."; fi
+        printf "  [%2d] %3d%%  %-9s %-13s %-8s \"%s\"\n" "$idx" "$PARSED_LVL" "$ui_type" "$(repeat_display "$PARSED_REP")" "${PARSED_DEL}ms" "$trunc_msg"
         ((idx++))
     done
     echo "──────────────────────────────────────────────────────────────────────────"
@@ -345,7 +389,8 @@ edit_alert_at_index() {
     new_msg="${new_msg:-$PARSED_MSG}"
 
     local new_rep
-    if ! prompt_number "3. Repeat count [1-100] (Press Enter for ${PARSED_REP}, or 'c' to cancel): " 1 100 "$PARSED_REP" new_rep; then
+    echo "3. Repeat behavior:"
+    if ! prompt_repeat_behavior "$PARSED_REP" "$new_typ" new_rep; then
         return
     fi
 
@@ -370,7 +415,7 @@ edit_alert() {
         ui_type=$(alert_type_short_name "$PARSED_TYP")
         local trunc_msg="$PARSED_MSG"
         if [ "${#trunc_msg}" -gt 38 ]; then trunc_msg="${trunc_msg:0:35}..."; fi
-        printf "  [%d] %3d%% [%-8s] (%sx, %sms) -> \"%s\"\n" "$idx" "$PARSED_LVL" "$ui_type" "$PARSED_REP" "$PARSED_DEL" "$trunc_msg"
+        printf "  [%d] %3d%% [%-8s] (%s, %sms) -> \"%s\"\n" "$idx" "$PARSED_LVL" "$ui_type" "$(repeat_display "$PARSED_REP")" "$PARSED_DEL" "$trunc_msg"
         ((idx++))
     done
     echo "──────────────────────────────────────────────────────────────────────────"
@@ -414,7 +459,7 @@ add_alert() {
                 type_desc=$(alert_type_plain_name "$PARSED_TYP")
                 echo "   • Alert type   : ${type_desc}"
                 echo "   • Spoken text  : \"${PARSED_MSG}\""
-                echo "   • Repeat count : ${PARSED_REP} times"
+                echo "   • Repeats      : $(repeat_display "$PARSED_REP")"
                 echo "   • Pause delay  : ${PARSED_DEL} ms"
             done
             echo "──────────────────────────────────────────────────────────────────────────"
@@ -468,7 +513,8 @@ add_alert() {
     if [ -z "$new_msg" ]; then new_msg="Battery is at $new_lvl percent"; fi
 
     local new_rep
-    if ! prompt_number "4. How many times to repeat? (Press Enter for ${REPEAT_COUNT:-10}, or 'c' to cancel): " 1 100 "${REPEAT_COUNT:-10}" new_rep; then
+    echo "4. Repeat behavior:"
+    if ! prompt_repeat_behavior "${REPEAT_COUNT:-10}" "$new_typ" new_rep; then
         return
     fi
 
@@ -557,11 +603,16 @@ edit_timing() {
         local updated_alerts=()
         for alert in "${ALERTS[@]}"; do
             parse_alert_entry "$alert"
-            updated_alerts+=("${PARSED_LVL}:${PARSED_TYP}:${new_cnt}:${new_del}:${PARSED_MSG}")
+            if [ "$PARSED_REP" = "0" ]; then
+                updated_alerts+=("${PARSED_LVL}:${PARSED_TYP}:0:${new_del}:${PARSED_MSG}")
+            else
+                updated_alerts+=("${PARSED_LVL}:${PARSED_TYP}:${new_cnt}:${new_del}:${PARSED_MSG}")
+            fi
         done
         ALERTS=("${updated_alerts[@]}")
         save_config || return
-        echo "  [✔] Applied ${new_cnt}x repeat and ${new_del} ms pause to all ${#ALERTS[@]} existing alert rules!"
+        echo "  [✔] Updated fixed-repeat rules and set every pause to ${new_del} ms."
+        echo "      Rules set to Until stopped stayed unlimited."
         read -r -p "Press [Enter] to return (or 'c')..."
     fi
 }
@@ -572,6 +623,7 @@ apply_timing_to_existing_rules() {
     echo "─── Apply Settings to Existing Rules ─────────────────────────────────────"
     echo "Current settings: Repeat: $REPEAT_COUNT times | Pause: ${REPEAT_DELAY_MS} ms"
     echo "Existing rules to update: ${#ALERTS[@]}"
+    echo "Rules set to Until stopped will stay unlimited."
     echo "──────────────────────────────────────────────────────────────────────────"
 
     local new_cnt
@@ -585,7 +637,7 @@ apply_timing_to_existing_rules() {
     fi
 
     echo ""
-    if ! read -r -p "Apply ${new_cnt}x repeat and ${new_del} ms pause to all ${#ALERTS[@]} rules? (y/n) (or 'c' to cancel): " confirm; then
+    if ! read -r -p "Update fixed repeats and set every pause to ${new_del} ms? (y/n) (or 'c' to cancel): " confirm; then
         echo "Input closed; no changes saved."
         return
     fi
@@ -600,11 +652,16 @@ apply_timing_to_existing_rules() {
         local updated_alerts=()
         for alert in "${ALERTS[@]}"; do
             parse_alert_entry "$alert"
-            updated_alerts+=("${PARSED_LVL}:${PARSED_TYP}:${new_cnt}:${new_del}:${PARSED_MSG}")
+            if [ "$PARSED_REP" = "0" ]; then
+                updated_alerts+=("${PARSED_LVL}:${PARSED_TYP}:0:${new_del}:${PARSED_MSG}")
+            else
+                updated_alerts+=("${PARSED_LVL}:${PARSED_TYP}:${new_cnt}:${new_del}:${PARSED_MSG}")
+            fi
         done
         ALERTS=("${updated_alerts[@]}")
         save_config || return
-        echo "  [✔] Applied ${new_cnt}x repeat and ${new_del} ms pause to all ${#ALERTS[@]} alert rules!"
+        echo "  [✔] Updated fixed-repeat rules and set every pause to ${new_del} ms."
+        echo "      Rules set to Until stopped stayed unlimited."
         read -r -p "Press [Enter] to return (or 'c')..."
     else
         echo "Cancelled without modifying existing rules."
@@ -621,13 +678,16 @@ edit_volume_settings() {
     fi
 
     echo ""
-    echo "─── Volume Target Settings ───────────────────────────────────────────────"
+    echo "─── Audio & Media Settings ───────────────────────────────────────────────"
     echo "Current system volume: ${cur_vol}"
     echo "Volume target: ${ALERT_VOLUME}%"
+    echo "Pause playing media: $([ "$PAUSE_MEDIA" = true ] && echo On || echo Off)"
     echo ""
     echo "Note: If your Mac is on mute or lower than the volume target, Battmon"
     echo "unmutes and temporarily raises it, then automatically restores your"
     echo "exact volume and mute state when done."
+    echo "It can also pause Music, Spotify, or QuickTime Player before an alert,"
+    echo "then restore the volume and resume only the media it paused."
     echo "──────────────────────────────────────────────────────────────────────────"
 
     local new_v
@@ -637,8 +697,25 @@ edit_volume_settings() {
     ALERT_VOLUME="$new_v"
     RESTORE_VOLUME=true
 
+    local media_choice media_default="y"
+    [ "$PAUSE_MEDIA" = "false" ] && media_default="n"
+    while true; do
+        if ! read -r -p "Pause playing media during alerts? [y/n] (Enter keeps current; 'c' cancels): " media_choice; then
+            echo "Input closed; no changes saved."
+            return
+        fi
+        media_choice=$(echo "$media_choice" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+        [ -z "$media_choice" ] && media_choice="$media_default"
+        case "$media_choice" in
+            y|yes) PAUSE_MEDIA=true; break ;;
+            n|no) PAUSE_MEDIA=false; break ;;
+            c) echo "Cancelled."; return ;;
+            *) echo "Please enter y or n (or 'c' to cancel)." ;;
+        esac
+    done
+
     save_config || return
-    echo "Volume target updated to ${ALERT_VOLUME}%."
+    echo "Audio settings updated: target ${ALERT_VOLUME}%; pause media $([ "$PAUSE_MEDIA" = true ] && echo on || echo off)."
 }
 
 reset_defaults() {
@@ -773,10 +850,11 @@ test_voice_interruption() {
     echo "  2) Speak an existing alert phrase once"
     echo "  3) Test charger cutoff"
     echo "  4) Test keyboard Mute or Volume Down cutoff"
-    echo "  5) Return to Main Menu"
+    echo "  5) Test pause, voice, and resume with playing media"
+    echo "  6) Return to Main Menu"
     echo "──────────────────────────────────────────────────────────────────────────"
     local tchoice custom_phrase idx=1 midx start_key
-    if ! prompt_number "Enter choice [1-5] (or 'c' to cancel): " 1 5 "5" tchoice; then
+    if ! prompt_number "Enter choice [1-6] (or 'c' to cancel): " 1 6 "6" tchoice; then
         return
     fi
 
@@ -799,7 +877,19 @@ test_voice_interruption() {
             if ! read -r -p "Press [Enter] to begin (or 'c' to cancel): " start_key; then return; fi
             [ "$start_key" = "c" ] || [ "$start_key" = "C" ] || run_interrupt_test "$([ "$tchoice" = "3" ] && echo charger || echo audio)" "Charge up your battery now"
             ;;
-        5) return ;;
+        5)
+            echo ""
+            echo "Start music in Apple Music, Spotify, or QuickTime Player."
+            echo "Battmon will pause it, speak once, restore the exact system volume,"
+            echo "then resume the same player from its paused position."
+            echo "If macOS asks for permission to control the player, choose Allow."
+            if ! read -r -p "Press [Enter] when the media is playing (or 'c' to cancel): " start_key; then return; fi
+            if [ "$start_key" != "c" ] && [ "$start_key" != "C" ]; then
+                /bin/bash "$SCRIPT_DIR/battery_monitor.sh" --test-media
+                read -r -p "Press [Enter] to return to the main menu..." || true
+            fi
+            ;;
+        6) return ;;
     esac
 }
 
@@ -891,10 +981,10 @@ main_menu() {
             ui_type=$(alert_type_short_name "$PARSED_TYP")
             local trunc_msg="$PARSED_MSG"
             if [ "${#trunc_msg}" -gt 33 ]; then trunc_msg="${trunc_msg:0:30}..."; fi
-            printf "  • %3d%% [%-8s] %2sx %4sms \"%s\"\n" "$PARSED_LVL" "$ui_type" "$PARSED_REP" "$PARSED_DEL" "$trunc_msg"
+            printf "  • %3d%% [%-8s] %-3s %4sms \"%s\"\n" "$PARSED_LVL" "$ui_type" "$(repeat_compact_display "$PARSED_REP")" "$PARSED_DEL" "$trunc_msg"
         done
         echo "──────────────────────────────────────────────────────────────────────────"
-        printf "  1) Edit an alert rule            7) Change volume target\n"
+        printf "  1) Edit an alert rule            7) Audio & media settings\n"
         printf "  2) Add new battery alert         8) Test voice & silencing keys\n"
         printf "  3) Delete an alert rule          9) Background service controls\n"
         printf "  4) View all alerts & status     10) Reset everything to default\n"
@@ -947,7 +1037,7 @@ doctor() {
         echo " [FAIL] Battmon requires macOS"
         failures=$((failures + 1))
     fi
-    for command_name in pmset say launchctl osascript awk sed sort mktemp plutil; do
+    for command_name in pmset say launchctl osascript pgrep ioreg sysctl awk sed sort mktemp plutil; do
         if command -v "$command_name" >/dev/null 2>&1; then
             printf ' [OK] %s\n' "$command_name"
         else

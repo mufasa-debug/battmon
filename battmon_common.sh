@@ -22,8 +22,10 @@ set_builtin_defaults() {
     REPEAT_COUNT=10
     REPEAT_DELAY_MS=100
     CHECK_INTERVAL_MS=200
+    STARTUP_GRACE_SECONDS=300
     ALERT_VOLUME=60
     RESTORE_VOLUME=true
+    PAUSE_MEDIA=true
     ALERTS=(
         "100:HIGH:10:100:Battery is fully charged"
         "80:HIGH:10:100:The battery is optimally charged"
@@ -39,6 +41,10 @@ is_integer_in_range() {
     local maximum="$3"
     [[ "$value" =~ ^[0-9]+$ ]] || return 1
     [ "$value" -ge "$minimum" ] && [ "$value" -le "$maximum" ]
+}
+
+is_valid_alert_repeat() {
+    [ "$1" = "0" ] || is_integer_in_range "$1" 1 100
 }
 
 config_signature() {
@@ -84,6 +90,10 @@ normalize_config() {
         warnings="${warnings}invalid CHECK_INTERVAL_MS; "
         CHECK_INTERVAL_MS=200
     fi
+    if ! is_integer_in_range "${STARTUP_GRACE_SECONDS:-}" 0 3600; then
+        warnings="${warnings}invalid STARTUP_GRACE_SECONDS; "
+        STARTUP_GRACE_SECONDS=300
+    fi
     if ! is_integer_in_range "${ALERT_VOLUME:-}" 1 100; then
         warnings="${warnings}invalid ALERT_VOLUME; "
         ALERT_VOLUME=60
@@ -91,6 +101,10 @@ normalize_config() {
     case "${RESTORE_VOLUME:-true}" in
         true|false) ;;
         *) RESTORE_VOLUME=true; warnings="${warnings}invalid RESTORE_VOLUME; " ;;
+    esac
+    case "${PAUSE_MEDIA:-true}" in
+        true|false) ;;
+        *) PAUSE_MEDIA=true; warnings="${warnings}invalid PAUSE_MEDIA; " ;;
     esac
 
     for alert in "${original_alerts[@]}"; do
@@ -103,7 +117,7 @@ normalize_config() {
             warnings="${warnings}skipped invalid alert type; "
             continue
         fi
-        if ! is_integer_in_range "$PARSED_REP" 1 100; then
+        if ! is_valid_alert_repeat "$PARSED_REP"; then
             warnings="${warnings}skipped invalid alert repeat; "
             continue
         fi
@@ -251,9 +265,11 @@ save_config() {
         printf '# Battmon active configuration. Managed by the battmon command.\n\n'
         printf 'REPEAT_COUNT=%s\n' "$REPEAT_COUNT"
         printf 'REPEAT_DELAY_MS=%s\n' "$REPEAT_DELAY_MS"
-        printf 'CHECK_INTERVAL_MS=%s\n\n' "$CHECK_INTERVAL_MS"
+        printf 'CHECK_INTERVAL_MS=%s\n' "$CHECK_INTERVAL_MS"
+        printf 'STARTUP_GRACE_SECONDS=%s\n\n' "$STARTUP_GRACE_SECONDS"
         printf 'ALERT_VOLUME=%s\n' "$ALERT_VOLUME"
-        printf 'RESTORE_VOLUME=%s\n\n' "$RESTORE_VOLUME"
+        printf 'RESTORE_VOLUME=%s\n' "$RESTORE_VOLUME"
+        printf 'PAUSE_MEDIA=%s\n\n' "$PAUSE_MEDIA"
         printf 'ALERTS=(\n'
         local alert
         for alert in "${ALERTS[@]}"; do
