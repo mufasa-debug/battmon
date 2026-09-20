@@ -2,6 +2,8 @@
 
 Battmon is a macOS battery voice-alert service with an 80×24 terminal manager. It watches charging and discharging thresholds, speaks configured messages, and can be interrupted immediately with a charger transition, Mute, or Volume Down.
 
+Each main-menu refresh clears the visible terminal and its scrollback so prior submenu output does not remain above the dashboard.
+
 ## Install
 
 ```bash

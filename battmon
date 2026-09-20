@@ -803,6 +803,12 @@ service_menu() {
     done
 }
 
+clear_main_menu_screen() {
+    # CSI 3 J clears saved scrollback; CSI 2 J clears the visible display;
+    # CSI H places the next dashboard at the top-left corner.
+    printf '\033[3J\033[2J\033[H'
+}
+
 main_menu() {
     while true; do
         load_config || {
@@ -819,7 +825,7 @@ main_menu() {
             [ "$cur_muted" = "true" ] && cur_v="${cur_v}M"
         fi
 
-        clear 2>/dev/null || echo ""
+        clear_main_menu_screen
         echo "─── BATTMON 🦇 Battery Voice Monitor ─────────────────────────────────────"
         local bat_str=" Battery: ${pct}% (${pwr})"
         [ "$pct" = "N/A" ] && bat_str=" Battery: Not detected"

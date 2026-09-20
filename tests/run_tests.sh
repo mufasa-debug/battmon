@@ -283,6 +283,26 @@ else
     pass "unknown command returns failure"
 fi
 
+# Every main-menu render clears both the visible display and scrollback.
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "10:LOW:1:100:ten percent"
+menu_output=$(printf '12\n11\n' | env HOME="$CASE_HOME" PATH="$TEST_BIN:$ORIGINAL_PATH" \
+    TERM=dumb TEST_POWER_SOURCE=Battery TEST_BATTERY_PERCENT=50 \
+    TEST_BATTERY_MODE=discharging TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false \
+    "$ROOT_DIR/battmon" 2>&1)
+clear_sequence=$'\033[3J\033[2J\033[H'
+clear_count=0
+menu_remainder="$menu_output"
+while [[ "$menu_remainder" == *"$clear_sequence"* ]]; do
+    menu_remainder="${menu_remainder#*"$clear_sequence"}"
+    clear_count=$((clear_count + 1))
+done
+if [ "$clear_count" -eq 2 ]; then
+    pass "main menu clears screen and scrollback on every render"
+else
+    fail "main menu clears screen and scrollback on every render"
+fi
+
 # Installer can deploy without starting or creating legacy aliases.
 new_case
 if env HOME="$CASE_HOME" PATH="$TEST_BIN:$ORIGINAL_PATH" "$ROOT_DIR/setup.sh" --no-start >/dev/null; then
