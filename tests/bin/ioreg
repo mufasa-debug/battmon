@@ -3,7 +3,11 @@
 if [ "${TEST_SESSION_STATE_UNKNOWN:-0}" = "1" ]; then
     exit 1
 elif [ "${TEST_SESSION_LOCKED:-0}" = "1" ]; then
-    printf '%s\n' '    "IOConsoleUsers" = ({"CGSSessionScreenIsLocked"=Yes})'
+    printf '%s' '    "IOConsoleUsers" = ({"CGSSessionScreenIsLocked"=Yes'
 else
-    printf '%s\n' '    "IOConsoleUsers" = ({"kCGSessionLoginDoneKey"=Yes})'
+    printf '%s' '    "IOConsoleUsers" = ({"kCGSessionLoginDoneKey"=Yes'
 fi
+if [ "${TEST_IOREG_LARGE_OUTPUT:-0}" = "1" ]; then
+    /usr/bin/awk 'BEGIN { for (i = 0; i < 100000; i++) printf "x" }'
+fi
+printf '%s\n' '})'

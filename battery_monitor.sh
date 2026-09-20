@@ -20,6 +20,10 @@ ACTIVE_ALERT_VOL=""
 USER_SILENCED=0
 MEDIA_PAUSED_APPS=()
 MEDIA_WAS_PLAYING=0
+MEDIA_CONTROL_WARNINGS=()
+MONITOR_LOCK_OWNER_PID=""
+BROWSER_PAUSE_JS='(()=>{let n=0;for(const m of document.querySelectorAll("audio,video")){if(!m.paused&&!m.ended){m.setAttribute("data-battmon-paused-by-daemon","1");m.pause();n++;}}return n;})()'
+BROWSER_RESUME_JS='(()=>{let n=0;for(const m of document.querySelectorAll("audio,video")){if(m.getAttribute("data-battmon-paused-by-daemon")==="1"){m.removeAttribute("data-battmon-paused-by-daemon");m.play().catch(()=>{});n++;}}return n;})()'
 
 release_monitor_lock() {
     [ "$LOCK_HELD" -eq 1 ] || return 0
@@ -64,6 +68,139 @@ pause_scriptable_player() {
     log_event "[Media] Paused $app_name"
 }
 
+pause_chromium_browser() {
+    local process_name="$1" app_name="$2" result paused_count attempted_count error_count
+    media_app_running "$process_name" || return 1
+    result=$(osascript \
+        -e 'on run argv' \
+        -e 'set mediaScript to item 1 of argv' \
+        -e 'with timeout of 5 seconds' \
+        -e "tell application \"$app_name\"" \
+        -e 'set pausedCount to 0' \
+        -e 'set attemptedCount to 0' \
+        -e 'set errorCount to 0' \
+        -e 'repeat with browserWindow in windows' \
+        -e 'repeat with browserTab in tabs of browserWindow' \
+        -e 'try' \
+        -e 'set tabURL to URL of browserTab' \
+        -e 'if tabURL starts with "http" then' \
+        -e 'set attemptedCount to attemptedCount + 1' \
+        -e 'set pauseResult to execute browserTab javascript mediaScript' \
+        -e 'set pausedCount to pausedCount + (pauseResult as integer)' \
+        -e 'end if' \
+        -e 'on error' \
+        -e 'set errorCount to errorCount + 1' \
+        -e 'end try' \
+        -e 'end repeat' \
+        -e 'end repeat' \
+        -e 'return (pausedCount as text) & ":" & (attemptedCount as text) & ":" & (errorCount as text)' \
+        -e 'end tell' \
+        -e 'end timeout' \
+        -e 'end run' -- "$BROWSER_PAUSE_JS" 2>/dev/null) || {
+            MEDIA_CONTROL_WARNINGS+=("$app_name")
+            return 1
+        }
+    IFS=: read -r paused_count attempted_count error_count <<< "$result"
+    [[ "$paused_count" =~ ^[0-9]+$ ]] || {
+        MEDIA_CONTROL_WARNINGS+=("$app_name")
+        return 1
+    }
+    if [[ "$attempted_count" =~ ^[0-9]+$ ]] && [[ "$error_count" =~ ^[0-9]+$ ]] && \
+        [ "$attempted_count" -gt 0 ] && [ "$error_count" -ge "$attempted_count" ]; then
+        MEDIA_CONTROL_WARNINGS+=("$app_name")
+    fi
+    [ "$paused_count" -gt 0 ] || return 1
+    MEDIA_PAUSED_APPS+=("$app_name")
+    MEDIA_WAS_PLAYING=1
+    log_event "[Media] Paused $paused_count browser media element(s) in $app_name"
+}
+
+pause_safari_browser() {
+    local result paused_count attempted_count error_count
+    media_app_running "Safari" || return 1
+    result=$(osascript \
+        -e 'on run argv' \
+        -e 'set mediaScript to item 1 of argv' \
+        -e 'with timeout of 5 seconds' \
+        -e 'tell application "Safari"' \
+        -e 'set pausedCount to 0' \
+        -e 'set attemptedCount to 0' \
+        -e 'set errorCount to 0' \
+        -e 'repeat with browserWindow in windows' \
+        -e 'repeat with browserTab in tabs of browserWindow' \
+        -e 'try' \
+        -e 'set tabURL to URL of browserTab' \
+        -e 'if tabURL starts with "http" then' \
+        -e 'set attemptedCount to attemptedCount + 1' \
+        -e 'set pauseResult to do JavaScript mediaScript in browserTab' \
+        -e 'set pausedCount to pausedCount + (pauseResult as integer)' \
+        -e 'end if' \
+        -e 'on error' \
+        -e 'set errorCount to errorCount + 1' \
+        -e 'end try' \
+        -e 'end repeat' \
+        -e 'end repeat' \
+        -e 'return (pausedCount as text) & ":" & (attemptedCount as text) & ":" & (errorCount as text)' \
+        -e 'end tell' \
+        -e 'end timeout' \
+        -e 'end run' -- "$BROWSER_PAUSE_JS" 2>/dev/null) || {
+            MEDIA_CONTROL_WARNINGS+=("Safari")
+            return 1
+        }
+    IFS=: read -r paused_count attempted_count error_count <<< "$result"
+    [[ "$paused_count" =~ ^[0-9]+$ ]] || {
+        MEDIA_CONTROL_WARNINGS+=("Safari")
+        return 1
+    }
+    if [[ "$attempted_count" =~ ^[0-9]+$ ]] && [[ "$error_count" =~ ^[0-9]+$ ]] && \
+        [ "$attempted_count" -gt 0 ] && [ "$error_count" -ge "$attempted_count" ]; then
+        MEDIA_CONTROL_WARNINGS+=("Safari")
+    fi
+    [ "$paused_count" -gt 0 ] || return 1
+    MEDIA_PAUSED_APPS+=("Safari")
+    MEDIA_WAS_PLAYING=1
+    log_event "[Media] Paused $paused_count browser media element(s) in Safari"
+}
+
+resume_chromium_browser() {
+    local app_name="$1"
+    osascript \
+        -e 'on run argv' \
+        -e 'set mediaScript to item 1 of argv' \
+        -e 'with timeout of 5 seconds' \
+        -e "tell application \"$app_name\"" \
+        -e 'repeat with browserWindow in windows' \
+        -e 'repeat with browserTab in tabs of browserWindow' \
+        -e 'try' \
+        -e 'set tabURL to URL of browserTab' \
+        -e 'if tabURL starts with "http" then execute browserTab javascript mediaScript' \
+        -e 'end try' \
+        -e 'end repeat' \
+        -e 'end repeat' \
+        -e 'end tell' \
+        -e 'end timeout' \
+        -e 'end run' -- "$BROWSER_RESUME_JS" >/dev/null 2>&1
+}
+
+resume_safari_browser() {
+    osascript \
+        -e 'on run argv' \
+        -e 'set mediaScript to item 1 of argv' \
+        -e 'with timeout of 5 seconds' \
+        -e 'tell application "Safari"' \
+        -e 'repeat with browserWindow in windows' \
+        -e 'repeat with browserTab in tabs of browserWindow' \
+        -e 'try' \
+        -e 'set tabURL to URL of browserTab' \
+        -e 'if tabURL starts with "http" then do JavaScript mediaScript in browserTab' \
+        -e 'end try' \
+        -e 'end repeat' \
+        -e 'end repeat' \
+        -e 'end tell' \
+        -e 'end timeout' \
+        -e 'end run' -- "$BROWSER_RESUME_JS" >/dev/null 2>&1
+}
+
 pause_quicktime_player() {
     local state
     media_app_running "QuickTime Player" || return 1
@@ -89,9 +226,16 @@ pause_active_media() {
     [ "${PAUSE_MEDIA:-true}" = "true" ] || return 0
     MEDIA_PAUSED_APPS=()
     MEDIA_WAS_PLAYING=0
+    MEDIA_CONTROL_WARNINGS=()
     pause_scriptable_player "Music" "Music" || true
     pause_scriptable_player "Spotify" "Spotify" || true
     pause_quicktime_player || true
+    pause_chromium_browser "Google Chrome" "Google Chrome" || true
+    pause_chromium_browser "Brave Browser" "Brave Browser" || true
+    pause_chromium_browser "Microsoft Edge" "Microsoft Edge" || true
+    pause_chromium_browser "Vivaldi" "Vivaldi" || true
+    pause_chromium_browser "Chromium" "Chromium" || true
+    pause_safari_browser || true
 }
 
 resume_paused_media() {
@@ -109,6 +253,20 @@ resume_paused_media() {
                 log_event "[Media] Resumed QuickTime Player"
             else
                 log_event "[Warning] Could not resume QuickTime Player"
+            fi
+        elif [ "$app" = "Safari" ]; then
+            if resume_safari_browser; then
+                log_event "[Media] Resumed browser media in Safari"
+            else
+                log_event "[Warning] Could not resume browser media in Safari"
+            fi
+        elif [ "$app" = "Google Chrome" ] || [ "$app" = "Brave Browser" ] || \
+            [ "$app" = "Microsoft Edge" ] || [ "$app" = "Vivaldi" ] || \
+            [ "$app" = "Chromium" ]; then
+            if resume_chromium_browser "$app"; then
+                log_event "[Media] Resumed browser media in $app"
+            else
+                log_event "[Warning] Could not resume browser media in $app"
             fi
         elif osascript -e 'with timeout of 2 seconds' \
             -e "tell application \"$app\" to play" \
@@ -157,7 +315,10 @@ acquire_monitor_lock() {
     if [[ "$lock_pid" =~ ^[0-9]+$ ]] && kill -0 "$lock_pid" 2>/dev/null; then
         lock_command=$(ps -p "$lock_pid" -o command= 2>/dev/null || true)
         case "$lock_command" in
-            *battery_monitor.sh*) return 2 ;;
+            *battery_monitor.sh*)
+                MONITOR_LOCK_OWNER_PID="$lock_pid"
+                return 2
+                ;;
         esac
     fi
 
@@ -223,17 +384,23 @@ write_state() {
 }
 
 session_lock_state() {
-    local session_info
-    session_info=$(ioreg -l -w 0 -d 1 -c IOResources 2>/dev/null) || {
-        printf 'unknown'
-        return 0
-    }
-    session_info="${session_info//[[:space:]]/}"
-    case "$session_info" in
-        *'"CGSSessionScreenIsLocked"=Yes'*|*'"CGSSessionScreenIsLocked"=true'*|*'"CGSSessionScreenIsLocked"=1'*) printf 'locked' ;;
-        *'"IOConsoleUsers"='*'"kCGSessionLoginDoneKey"=Yes'*) printf 'unlocked' ;;
-        *) printf 'unknown' ;;
-    esac
+    # Reduce ioreg's potentially large output inside awk. Copying and stripping
+    # the full response in Bash can become quadratic and leave the monitor lock
+    # held indefinitely on some macOS versions.
+    ioreg -l -w 0 -d 1 -c IOResources 2>/dev/null | LC_ALL=C awk '
+        /"CGSSessionScreenIsLocked"[[:space:]]*=[[:space:]]*(Yes|true|1)/ {
+            locked = 1
+            exit
+        }
+        /"IOConsoleUsers"/ && /"kCGSessionLoginDoneKey"[[:space:]]*=[[:space:]]*Yes/ {
+            unlocked = 1
+        }
+        END {
+            if (locked) print "locked"
+            else if (unlocked) print "unlocked"
+            else print "unknown"
+        }
+    '
 }
 
 system_uptime_seconds() {
@@ -506,12 +673,23 @@ select_trigger_rule() {
     [ -n "$SELECTED_ALERT" ]
 }
 
+print_media_control_guidance() {
+    [ "${#MEDIA_CONTROL_WARNINGS[@]}" -gt 0 ] || return 0
+    printf 'Battmon could not inspect media in: %s\n' "${MEDIA_CONTROL_WARNINGS[*]}"
+    echo "For Chrome or Brave: View > Developer > Allow JavaScript from Apple Events."
+    echo "For Safari: Develop > Allow JavaScript from Apple Events."
+    echo "If macOS asks for Automation permission, choose Allow, then retry the test."
+}
+
 run_media_test() {
     local lock_result speech_result test_message
     acquire_monitor_lock
     lock_result=$?
     if [ "$lock_result" -eq 2 ]; then
-        echo "A battery alert is already running. Try the media test again shortly."
+        printf 'Battmon monitor process %s is still active, so the media test cannot overlap it.\n' \
+            "${MONITOR_LOCK_OWNER_PID:-unknown}"
+        echo "If an alert is speaking, stop it with Mute, Volume Down, or the charger."
+        echo "If nothing is speaking, run 'battmon stop' once, then retry this test."
         return 2
     elif [ "$lock_result" -ne 0 ]; then
         echo "Battmon could not start the media test."
@@ -529,11 +707,13 @@ run_media_test() {
 
     pause_active_media
     if [ "$MEDIA_WAS_PLAYING" -ne 1 ]; then
-        echo "No playing Apple Music, Spotify, or QuickTime Player media was found."
-        echo "Start playback in one of those apps, then run this test again."
+        print_media_control_guidance
+        echo "No controllable playing media was found."
+        echo "Start playback in a supported app or browser tab, then retry."
         return 3
     fi
 
+    print_media_control_guidance
     prepare_audio
     printf 'Paused: %s\n' "${MEDIA_PAUSED_APPS[*]}"
     echo "Speaking the test message now..."

@@ -98,7 +98,14 @@ run_monitor() {
         TEST_INTERRUPTED_AUDIO_MUTED="${TEST_INTERRUPTED_AUDIO_MUTED:-false}" \
         TEST_SESSION_LOCKED="${TEST_SESSION_LOCKED:-0}" \
         TEST_SESSION_STATE_UNKNOWN="${TEST_SESSION_STATE_UNKNOWN:-0}" \
+        TEST_IOREG_LARGE_OUTPUT="${TEST_IOREG_LARGE_OUTPUT:-0}" \
         TEST_SYSTEM_UPTIME_SECONDS="${TEST_SYSTEM_UPTIME_SECONDS:-86400}" \
+        TEST_CHROME_MEDIA_COUNT="${TEST_CHROME_MEDIA_COUNT:-0}" \
+        TEST_BRAVE_MEDIA_COUNT="${TEST_BRAVE_MEDIA_COUNT:-0}" \
+        TEST_SAFARI_MEDIA_COUNT="${TEST_SAFARI_MEDIA_COUNT:-0}" \
+        TEST_CHROME_CONTROL_FAIL="${TEST_CHROME_CONTROL_FAIL:-0}" \
+        TEST_BRAVE_CONTROL_FAIL="${TEST_BRAVE_CONTROL_FAIL:-0}" \
+        TEST_SAFARI_CONTROL_FAIL="${TEST_SAFARI_CONTROL_FAIL:-0}" \
         /bin/bash "$ROOT_DIR/battery_monitor.sh"
 }
 
@@ -208,7 +215,7 @@ fi
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" "1:LOW:1:50:one percent"
 write_state "$CASE_HOME/.battmon/state" 2 "" "" discharging BATTERY
-TEST_SESSION_LOCKED=1 TEST_SYSTEM_UPTIME_SECONDS=86400 \
+TEST_SESSION_LOCKED=1 TEST_IOREG_LARGE_OUTPUT=1 TEST_SYSTEM_UPTIME_SECONDS=86400 \
     TEST_POWER_SOURCE=Battery TEST_BATTERY_PERCENT=1 \
     TEST_BATTERY_MODE=discharging run_monitor
 locked_state_ok=0
@@ -339,6 +346,21 @@ else
     fail "unlimited alert pauses media, stops on Volume Down, restores, and resumes in order"
 fi
 
+# Browser media is marked per element so only what Battmon paused is resumed.
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "50:LOW:1:50:browser alert"
+write_state "$CASE_HOME/.battmon/state" 51 "" "" discharging BATTERY
+TEST_RUNNING_MEDIA_APPS='Google Chrome,Brave Browser,Safari' \
+    TEST_CHROME_MEDIA_COUNT=1 TEST_BRAVE_MEDIA_COUNT=2 TEST_SAFARI_MEDIA_COUNT=1 \
+    TEST_POWER_SOURCE=Battery TEST_BATTERY_PERCENT=50 \
+    TEST_BATTERY_MODE=discharging run_monitor
+event_sequence=$(tr '\n' '|' < "$EVENT_LOG")
+if [[ "$event_sequence" == 'media:pause:Google Chrome|media:pause:Brave Browser|media:pause:Safari|say:browser alert|audio:restore|media:resume:Google Chrome|media:resume:Brave Browser|media:resume:Safari|' ]]; then
+    pass "Chrome, Brave, and Safari media pause before speech and resume afterward"
+else
+    fail "Chrome, Brave, and Safari media pause before speech and resume afterward"
+fi
+
 # A running but already-paused player must be left alone.
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" "50:LOW:1:50:one alert"
@@ -419,6 +441,19 @@ if env HOME="$CASE_HOME" PATH="$TEST_BIN:$ORIGINAL_PATH" "$ROOT_DIR/battmon" unk
     fail "unknown command returns failure"
 else
     pass "unknown command returns failure"
+fi
+
+# Stopping Battmon also clears a dead monitor lock that would block media tests.
+new_case
+mkdir -p "$CASE_HOME/.battmon/monitor.lock"
+printf '999999\n' > "$CASE_HOME/.battmon/monitor.lock/pid"
+stop_output=$(env HOME="$CASE_HOME" PATH="$TEST_BIN:$ORIGINAL_PATH" \
+    "$ROOT_DIR/battmon" stop 2>&1)
+if [ ! -e "$CASE_HOME/.battmon/monitor.lock" ] && \
+    [[ "$stop_output" == *"Background monitor is already stopped."* ]]; then
+    pass "stop command removes a stale monitor lock"
+else
+    fail "stop command removes a stale monitor lock"
 fi
 
 # Every main-menu render clears both the visible display and scrollback.
@@ -559,6 +594,23 @@ if [[ "$media_test_output" == *"Media test complete. Original volume restored an
     pass "interactive media test pauses, speaks, restores volume, and resumes"
 else
     fail "interactive media test pauses, speaks, restores volume, and resumes"
+fi
+
+# Browser permission failures explain the exact recovery step.
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "10:LOW:1:100:ten percent"
+browser_help_output=$(printf '8\n5\n\n\n11\n' | env HOME="$CASE_HOME" \
+    PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
+    TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
+    TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false TEST_SAY_LOG="$SAY_LOG" \
+    TEST_EVENT_LOG="$EVENT_LOG" TEST_RUNNING_MEDIA_APPS='Google Chrome' \
+    TEST_CHROME_CONTROL_FAIL=1 "$ROOT_DIR/battmon" 2>&1)
+if [[ "$browser_help_output" == *"Battmon could not inspect media in: Google Chrome"* ]] && \
+    [[ "$browser_help_output" == *"View > Developer > Allow JavaScript from Apple Events"* ]] && \
+    [ ! -s "$SAY_LOG" ]; then
+    pass "media test gives actionable browser permission recovery"
+else
+    fail "media test gives actionable browser permission recovery"
 fi
 
 # Installer can deploy without starting or creating legacy aliases.

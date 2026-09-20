@@ -23,6 +23,27 @@ case "$request" in
     *'tell application "QuickTime Player"'*'playing of front document'*)
         [ "${TEST_QUICKTIME_STATE:-paused}" = "playing" ] && printf 'playing\n' || printf 'not-playing\n'
         ;;
+    *'tell application "Google Chrome"'*'data-battmon-paused-by-daemon'*'.pause()'*)
+        [ "${TEST_CHROME_CONTROL_FAIL:-0}" = "1" ] && exit 1
+        count="${TEST_CHROME_MEDIA_COUNT:-0}"
+        [ "$count" -gt 0 ] && log_event 'media:pause:Google Chrome'
+        printf '%s:1:0\n' "$count"
+        ;;
+    *'tell application "Brave Browser"'*'data-battmon-paused-by-daemon'*'.pause()'*)
+        [ "${TEST_BRAVE_CONTROL_FAIL:-0}" = "1" ] && exit 1
+        count="${TEST_BRAVE_MEDIA_COUNT:-0}"
+        [ "$count" -gt 0 ] && log_event 'media:pause:Brave Browser'
+        printf '%s:1:0\n' "$count"
+        ;;
+    *'tell application "Safari"'*'data-battmon-paused-by-daemon'*'.pause()'*)
+        [ "${TEST_SAFARI_CONTROL_FAIL:-0}" = "1" ] && exit 1
+        count="${TEST_SAFARI_MEDIA_COUNT:-0}"
+        [ "$count" -gt 0 ] && log_event 'media:pause:Safari'
+        printf '%s:1:0\n' "$count"
+        ;;
+    *'tell application "Google Chrome"'*'data-battmon-paused-by-daemon'*'.play()'*) log_event 'media:resume:Google Chrome' ;;
+    *'tell application "Brave Browser"'*'data-battmon-paused-by-daemon'*'.play()'*) log_event 'media:resume:Brave Browser' ;;
+    *'tell application "Safari"'*'data-battmon-paused-by-daemon'*'.play()'*) log_event 'media:resume:Safari' ;;
     *'tell application "Music" to pause'*) log_event 'media:pause:Music' ;;
     *'tell application "Spotify" to pause'*) log_event 'media:pause:Spotify' ;;
     *'tell application "QuickTime Player" to pause front document'*) log_event 'media:pause:QuickTime Player' ;;
