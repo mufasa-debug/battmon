@@ -1,0 +1,8 @@
+# Battmon Requirements
+# Built-in macOS command-line tools:
+pmset
+say
+launchctl
+osascript
+bash
+awk

@@ -1,0 +1,1019 @@
+#!/bin/bash
+# ==============================================================================
+# BATTMON: macOS Battery Voice Monitor & Interactive Manager
+# Universal for any macOS machine. Standard 80x24 terminal friendly.
+# ==============================================================================
+
+# Resolve symlink to locate the real directory containing battmon
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+RUNTIME_DIR="$HOME/.battmon"
+RUNTIME_CONFIG="$RUNTIME_DIR/battery_config.sh"
+PACKAGE_CONFIG="$SCRIPT_DIR/battery_config.sh"
+CONFIG_FILE="$RUNTIME_CONFIG"
+PLIST_DST="$HOME/Library/LaunchAgents/com.battery.batmon.plist"
+LOG_FILE="/tmp/battmon.log"
+STATE_FILE="$HOME/.battmon_state"
+
+mkdir -p "$RUNTIME_DIR" 2>/dev/null || true
+
+show_help() {
+    cat << EOF
+─── BATTMON 🦇 macOS Battery Voice Monitor ───────────────────────────────
+Usage: battmon [command|option]
+
+Commands:
+  battmon              Open interactive number-based terminal GUI
+  battmon -h, --help   Show this help manual and exit
+  battmon status       Show battery level, volume target & alert rules
+  battmon test         Test voice alerts, charger cutoff & keyboard keys
+  battmon run          Trigger an immediate battery evaluation cycle
+  battmon start/stop   Start or stop background monitor
+  battmon restart      Restart background service and refresh config
+  battmon edit         Open battery_config.sh in text editor
+
+Silencing Shortcuts:
+  • Plug in or unplug your charger to stop an active alert immediately.
+  • Press MUTE (F10) on keyboard to silence alert immediately.
+  • Press VOLUME DOWN (F11) on keyboard to silence alert immediately.
+
+Files:
+  Config : ~/.battmon/battery_config.sh
+  Logs   : /tmp/battmon.log
+──────────────────────────────────────────────────────────────────────────
+EOF
+}
+
+load_config() {
+    local target_cfg=""
+    if [ -f "$RUNTIME_CONFIG" ] && [ -f "$PACKAGE_CONFIG" ]; then
+        if [ "$RUNTIME_CONFIG" -nt "$PACKAGE_CONFIG" ]; then
+            target_cfg="$RUNTIME_CONFIG"
+            cp "$RUNTIME_CONFIG" "$PACKAGE_CONFIG" 2>/dev/null || true
+        else
+            target_cfg="$PACKAGE_CONFIG"
+            cp "$PACKAGE_CONFIG" "$RUNTIME_CONFIG" 2>/dev/null || true
+        fi
+    elif [ -f "$RUNTIME_CONFIG" ]; then
+        target_cfg="$RUNTIME_CONFIG"
+        if [ -d "$SCRIPT_DIR" ] && [ "$SCRIPT_DIR" != "$HOME/.local/bin" ]; then
+            cp "$RUNTIME_CONFIG" "$PACKAGE_CONFIG" 2>/dev/null || true
+        fi
+    elif [ -f "$PACKAGE_CONFIG" ]; then
+        target_cfg="$PACKAGE_CONFIG"
+        cp "$PACKAGE_CONFIG" "$RUNTIME_CONFIG" 2>/dev/null || true
+    fi
+
+    if [ -n "$target_cfg" ]; then
+        source "$target_cfg" 2>/dev/null || true
+    fi
+
+    REPEAT_COUNT="${REPEAT_COUNT:-10}"
+    REPEAT_DELAY_MS="${REPEAT_DELAY_MS:-100}"
+    CHECK_INTERVAL_MS="${CHECK_INTERVAL_MS:-200}"
+    ALERT_VOLUME="${ALERT_VOLUME:-60}"
+    RESTORE_VOLUME=true
+}
+
+load_config
+
+sort_alerts() {
+    local sorted=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && sorted+=("$line")
+    done < <(printf '%s\n' "${ALERTS[@]}" | sort -t: -k1,1nr)
+    ALERTS=("${sorted[@]}")
+}
+
+sync_runtime_files() {
+    mkdir -p "$RUNTIME_DIR" "$HOME/.batmon" 2>/dev/null || true
+    if [ -f "$SCRIPT_DIR/battery_monitor.sh" ]; then
+        cp "$SCRIPT_DIR/battery_monitor.sh" "$RUNTIME_DIR/battery_monitor.sh" 2>/dev/null || true
+        chmod +x "$RUNTIME_DIR/battery_monitor.sh" 2>/dev/null || true
+        cp "$SCRIPT_DIR/battery_monitor.sh" "$HOME/.batmon/battery_monitor.sh" 2>/dev/null || true
+        chmod +x "$HOME/.batmon/battery_monitor.sh" 2>/dev/null || true
+    fi
+}
+
+save_config() {
+    sort_alerts
+    mkdir -p "$RUNTIME_DIR" "$HOME/.batmon" 2>/dev/null || true
+
+    local config_file_temp
+    config_file_temp=$(mktemp /tmp/battmon_cfg.XXXXXX 2>/dev/null || echo "/tmp/battmon_cfg_tmp.sh")
+
+    {
+        echo "#!/bin/bash"
+        echo "# =============================================================================="
+        echo "# Battmon Configuration File"
+        echo "# ------------------------------------------------------------------------------"
+        echo "# Edit directly or use the interactive Battmon GUI (\`battmon\`)."
+        echo "# =============================================================================="
+        echo ""
+        echo "REPEAT_COUNT=$REPEAT_COUNT"
+        echo "REPEAT_DELAY_MS=$REPEAT_DELAY_MS"
+        echo "CHECK_INTERVAL_MS=$CHECK_INTERVAL_MS"
+        echo ""
+        echo "ALERT_VOLUME=$ALERT_VOLUME"
+        echo "RESTORE_VOLUME=true"
+        echo ""
+        echo "ALERTS=("
+        for alert in "${ALERTS[@]}"; do
+            echo "    \"$alert\""
+        done
+        echo ")"
+        echo ""
+    } > "$config_file_temp"
+
+    # 1. Save to runtime directory (~/.battmon/battery_config.sh)
+    cp "$config_file_temp" "$RUNTIME_CONFIG" 2>/dev/null || true
+    chmod +x "$RUNTIME_CONFIG" 2>/dev/null || true
+
+    # 2. Save to package folder (e.g. ~/Desktop/Battmon/battery_config.sh)
+    if [ -d "$SCRIPT_DIR" ] && [ "$SCRIPT_DIR" != "$HOME/.local/bin" ]; then
+        cp "$config_file_temp" "$PACKAGE_CONFIG" 2>/dev/null || true
+        chmod +x "$PACKAGE_CONFIG" 2>/dev/null || true
+    fi
+    if [ -f "$HOME/Desktop/Battmon/battery_config.sh" ]; then
+        cp "$config_file_temp" "$HOME/Desktop/Battmon/battery_config.sh" 2>/dev/null || true
+        chmod +x "$HOME/Desktop/Battmon/battery_config.sh" 2>/dev/null || true
+    fi
+
+    # 3. Save to legacy directory if present
+    if [ -d "$HOME/.batmon" ]; then
+        cp "$config_file_temp" "$HOME/.batmon/battery_config.sh" 2>/dev/null || true
+        chmod +x "$HOME/.batmon/battery_config.sh" 2>/dev/null || true
+    fi
+
+    rm -f "$config_file_temp"
+    sync_runtime_files
+    echo "Settings saved successfully."
+}
+
+get_battery_percent() {
+    pmset -g batt | grep -Eo "[0-9]+%" | head -n 1 | tr -d '%'
+}
+
+is_ac_power() {
+    pmset -g batt | grep -q 'AC Power'
+}
+
+get_audio_settings() {
+    osascript -e "get {output volume, output muted} of (get volume settings)" 2>/dev/null | tr -d ','
+}
+
+set_sys_volume() {
+    local v="$1"
+    osascript -e "set volume output volume $v" 2>/dev/null || true
+}
+
+set_sys_muted() {
+    local m="$1"
+    osascript -e "set volume output muted $m" 2>/dev/null || true
+}
+
+is_service_running() {
+    launchctl list 2>/dev/null | grep -q "com.battery.batmon"
+}
+
+service_install() {
+    sync_runtime_files
+    mkdir -p "$HOME/Library/LaunchAgents"
+
+    # Dynamically generate plist for this user machine
+    cat << EOF > "$PLIST_DST"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.battery.batmon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>$HOME/.battmon/battery_monitor.sh</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>StandardOutPath</key>
+    <string>/tmp/battmon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/battmon.log</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
+EOF
+
+    launchctl unload "$PLIST_DST" 2>/dev/null || true
+    launchctl load "$PLIST_DST" 2>/dev/null || true
+    install_symlinks
+    echo "Background monitor active and will auto-start every time this Mac turns on."
+}
+
+service_stop() {
+    launchctl unload "$PLIST_DST" 2>/dev/null || true
+    echo "Background monitor stopped."
+}
+
+service_start() {
+    service_install
+}
+
+service_restart() {
+    service_stop
+    sleep 0.5
+    service_start
+}
+
+install_symlinks() {
+    local bindir="$HOME/.local/bin"
+    mkdir -p "$bindir"
+    for name in battmon Battmon batmon Batmon battery battery-monitor; do
+        ln -sf "$SCRIPT_DIR/battmon" "$bindir/$name"
+    done
+}
+
+parse_alert_entry() {
+    local alert="$1"
+    IFS=":" read -r p1 p2 p3 p4 p5 <<< "$alert"
+    if [ -n "$p5" ]; then
+        PARSED_LVL="$p1"
+        PARSED_TYP="$p2"
+        PARSED_REP="${p3:-$REPEAT_COUNT}"
+        PARSED_DEL="${p4:-$REPEAT_DELAY_MS}"
+        PARSED_MSG="$p5"
+    else
+        PARSED_LVL="$p1"
+        PARSED_TYP="$p2"
+        PARSED_REP="$REPEAT_COUNT"
+        PARSED_DEL="$REPEAT_DELAY_MS"
+        PARSED_MSG="$p3"
+    fi
+}
+
+prompt_number() {
+    local prompt_msg="$1"
+    local min_val="$2"
+    local max_val="$3"
+    local default_val="$4"
+    local result_var="$5"
+
+    while true; do
+        read -r -p "$prompt_msg" input_val
+        input_val=$(echo "$input_val" | tr -d '[:space:]')
+
+        if [ "$input_val" = "c" ] || [ "$input_val" = "C" ]; then
+            echo "Cancelled."
+            return 1
+        fi
+
+        if [ -z "$input_val" ] && [ -n "$default_val" ]; then
+            eval "$result_var=\"$default_val\""
+            return 0
+        fi
+
+        if [[ "$input_val" =~ ^[0-9]+$ ]]; then
+            if [ -n "$min_val" ] && [ "$input_val" -lt "$min_val" ]; then
+                echo "Please enter a number that is at least $min_val (or 'c' to cancel)."
+                continue
+            fi
+            if [ -n "$max_val" ] && [ "$input_val" -gt "$max_val" ]; then
+                echo "Please enter a number that is at most $max_val (or 'c' to cancel)."
+                continue
+            fi
+            eval "$result_var=\"$input_val\""
+            return 0
+        else
+            echo "Please enter numbers only (e.g. 10), or 'c' to cancel."
+        fi
+    done
+}
+
+show_status() {
+    load_config
+    local pct
+    pct=$(get_battery_percent)
+    local pwr="On Battery"
+    if is_ac_power; then pwr="Currently Charging"; fi
+    local audio_info
+    audio_info=$(get_audio_settings)
+    local cur_vol
+    cur_vol=$(echo "$audio_info" | awk '{print $1}')
+
+    echo "─── BATTMON STATUS ───────────────────────────────────────────────────────"
+    printf " Battery               : %-4s (%s)\n" "${pct}%" "$pwr"
+    printf " Current system volume : %s%%\n" "$cur_vol"
+    printf " Volume target         : %s%%\n" "$ALERT_VOLUME"
+    echo "──────────────────────────────────────────────────────────────────────────"
+    echo " Configured Alert Rules:"
+    printf "   %-3s %-5s %-6s %-7s %-9s %s\n" "#" "LVL" "TYPE" "REPEATS" "PAUSE" "SPOKEN MESSAGE"
+    local idx=1
+    for alert in "${ALERTS[@]}"; do
+        parse_alert_entry "$alert"
+        local trunc_msg="$PARSED_MSG"
+        if [ "${#trunc_msg}" -gt 34 ]; then trunc_msg="${trunc_msg:0:31}..."; fi
+        printf "  [%2d] %3d%%  %-5s  %-6s  %-7s  \"%s\"\n" "$idx" "$PARSED_LVL" "$PARSED_TYP" "${PARSED_REP}x" "${PARSED_DEL}ms" "$trunc_msg"
+        ((idx++))
+    done
+    echo "──────────────────────────────────────────────────────────────────────────"
+}
+
+edit_alert_at_index() {
+    local target_idx="$1"
+    parse_alert_entry "${ALERTS[$target_idx]}"
+    local alert_num=$((target_idx + 1))
+    local lvl="$PARSED_LVL"
+
+    echo ""
+    echo "─── Editing Alert #$alert_num (${lvl}%) ────────────────────────────────────────"
+    echo "Percentage: ${lvl}% (Fixed)"
+    echo "──────────────────────────────────────────────────────────────────────────"
+
+    echo "1. Trigger condition:"
+    echo "   1) HIGH (triggers while charging up to ${lvl}%; stops when unplugged)"
+    echo "   2) LOW  (triggers on battery draining to ${lvl}%; stops when plugged in)"
+    local cur_choice=1
+    if [ "$PARSED_TYP" = "LOW" ]; then cur_choice=2; fi
+    local trig_sel
+    if ! prompt_number "Enter choice [1 or 2] (Press Enter for $cur_choice, or 'c' to cancel): " 1 2 "$cur_choice" trig_sel; then
+        return
+    fi
+    local new_typ="HIGH"
+    if [ "$trig_sel" = "2" ]; then new_typ="LOW"; fi
+
+    read -r -p "2. Spoken message (Press Enter for \"${PARSED_MSG}\", or 'c' to cancel): " new_msg
+    if [ "$new_msg" = "c" ] || [ "$new_msg" = "C" ]; then echo "Cancelled."; return; fi
+    new_msg="${new_msg:-$PARSED_MSG}"
+
+    local new_rep
+    if ! prompt_number "3. Repeat count [1-100] (Press Enter for ${PARSED_REP}, or 'c' to cancel): " 1 100 "$PARSED_REP" new_rep; then
+        return
+    fi
+
+    local new_del
+    if ! prompt_number "4. Pause delay in milliseconds (min 50 ms) (Press Enter for ${PARSED_DEL} ms, or 'c' to cancel): " 50 60000 "$PARSED_DEL" new_del; then
+        return
+    fi
+
+    ALERTS[$target_idx]="${lvl}:${new_typ}:${new_rep}:${new_del}:${new_msg}"
+    save_config
+    echo "Alert #$alert_num (${lvl}%) updated successfully."
+}
+
+edit_alert() {
+    load_config
+    echo ""
+    echo "─── Edit an Existing Alert ───────────────────────────────────────────────"
+    local idx=1
+    for alert in "${ALERTS[@]}"; do
+        parse_alert_entry "$alert"
+        local trunc_msg="$PARSED_MSG"
+        if [ "${#trunc_msg}" -gt 38 ]; then trunc_msg="${trunc_msg:0:35}..."; fi
+        printf "  [%d] %3d%% [%-4s] (%sx, %sms) -> \"%s\"\n" "$idx" "$PARSED_LVL" "$PARSED_TYP" "$PARSED_REP" "$PARSED_DEL" "$trunc_msg"
+        ((idx++))
+    done
+    echo "──────────────────────────────────────────────────────────────────────────"
+    local alert_num
+    if ! prompt_number "Enter alert number to edit [1-${#ALERTS[@]}] (or 'c' to cancel): " 1 "${#ALERTS[@]}" "" alert_num; then
+        return
+    fi
+
+    edit_alert_at_index "$((alert_num - 1))"
+}
+
+add_alert() {
+    load_config
+    echo ""
+    echo "─── Add New Battery Alert ────────────────────────────────────────────────"
+
+    local new_lvl=""
+    local replace_idx=""
+
+    while true; do
+        if ! prompt_number "1. Battery percentage [1-100] (e.g. 67, 82) (or 'c' to cancel): " 1 100 "" new_lvl; then
+            return
+        fi
+
+        # Check if an alert rule for new_lvl already exists
+        local match_indices=()
+        for i in "${!ALERTS[@]}"; do
+            parse_alert_entry "${ALERTS[$i]}"
+            if [ "$PARSED_LVL" -eq "$new_lvl" ]; then
+                match_indices+=("$i")
+            fi
+        done
+
+        if [ ${#match_indices[@]} -gt 0 ]; then
+            echo ""
+            echo "  ⚠️  An alert rule for ${new_lvl}% already exists!"
+            echo "  Current settings for this alert:"
+            for mi in "${match_indices[@]}"; do
+                parse_alert_entry "${ALERTS[$mi]}"
+                local type_desc="Charging"
+                if [ "$PARSED_TYP" = "LOW" ]; then type_desc="On Battery / Discharging"; fi
+                echo "   • Type         : ${PARSED_TYP} (${type_desc})"
+                echo "   • Spoken text  : \"${PARSED_MSG}\""
+                echo "   • Repeat count : ${PARSED_REP} times"
+                echo "   • Pause delay  : ${PARSED_DEL} ms"
+            done
+            echo "──────────────────────────────────────────────────────────────────────────"
+            echo "  Options:"
+            echo "   1) Edit this existing alert"
+            echo "   2) Overwrite with new settings"
+            echo "   3) Choose a different percentage"
+            echo "   4) Cancel & return to menu"
+
+            local conflict_choice
+            if ! prompt_number "Enter choice [1-4] (Press Enter for 1, or 'c' to cancel): " 1 4 "1" conflict_choice; then
+                return
+            fi
+
+            case "$conflict_choice" in
+                1)
+                    edit_alert_at_index "${match_indices[0]}"
+                    return
+                    ;;
+                2)
+                    replace_idx="${match_indices[0]}"
+                    break
+                    ;;
+                3)
+                    echo ""
+                    continue
+                    ;;
+                4)
+                    return
+                    ;;
+            esac
+        else
+            break
+        fi
+    done
+
+    echo "2. Trigger condition:"
+    echo "   1) HIGH (triggers while charging up to this %; stops when unplugged)"
+    echo "   2) LOW  (triggers on battery draining to this %; stops when plugged in)"
+    local trig_choice
+    if ! prompt_number "Enter choice [1 or 2] (Press Enter for 1, or 'c' to cancel): " 1 2 "1" trig_choice; then
+        return
+    fi
+    local new_typ="HIGH"
+    if [ "$trig_choice" = "2" ]; then new_typ="LOW"; fi
+
+    read -r -p "3. Spoken message (Press Enter for 'Battery is at $new_lvl percent', or 'c' to cancel): " new_msg
+    if [ "$new_msg" = "c" ] || [ "$new_msg" = "C" ]; then echo "Cancelled."; return; fi
+    if [ -z "$new_msg" ]; then new_msg="Battery is at $new_lvl percent"; fi
+
+    local new_rep
+    if ! prompt_number "4. How many times to repeat? (Press Enter for ${REPEAT_COUNT:-10}, or 'c' to cancel): " 1 100 "${REPEAT_COUNT:-10}" new_rep; then
+        return
+    fi
+
+    local new_del
+    if ! prompt_number "5. Pause delay in milliseconds (minimum 50 ms) (Press Enter for ${REPEAT_DELAY_MS:-100} ms, or 'c' to cancel): " 50 60000 "${REPEAT_DELAY_MS:-100}" new_del; then
+        return
+    fi
+
+    if [ -n "$replace_idx" ]; then
+        ALERTS[$replace_idx]="${new_lvl}:${new_typ}:${new_rep}:${new_del}:${new_msg}"
+        save_config
+        echo "Alert for ${new_lvl}% overwritten successfully."
+    else
+        ALERTS+=("${new_lvl}:${new_typ}:${new_rep}:${new_del}:${new_msg}")
+        save_config
+        echo "Added alert: ${new_lvl}% (${new_typ}) -> \"${new_msg}\""
+    fi
+}
+
+delete_alert() {
+    load_config
+    echo ""
+    echo "─── Delete an Alert Rule ─────────────────────────────────────────────────"
+    local idx=1
+    for alert in "${ALERTS[@]}"; do
+        parse_alert_entry "$alert"
+        local trunc_msg="$PARSED_MSG"
+        if [ "${#trunc_msg}" -gt 42 ]; then trunc_msg="${trunc_msg:0:39}..."; fi
+        printf "  [%d] %3d%% [%-4s] -> \"%s\"\n" "$idx" "$PARSED_LVL" "$PARSED_TYP" "$trunc_msg"
+        ((idx++))
+    done
+    echo "──────────────────────────────────────────────────────────────────────────"
+    local alert_num
+    if ! prompt_number "Enter number to delete (or 'c' to cancel): " 1 "${#ALERTS[@]}" "" alert_num; then
+        return
+    fi
+
+    local target_idx=$((alert_num - 1))
+    local deleted="${ALERTS[$target_idx]}"
+    unset 'ALERTS[target_idx]'
+    ALERTS=("${ALERTS[@]}")
+    save_config
+    echo "Deleted: $deleted"
+}
+
+edit_timing() {
+    load_config
+    echo ""
+    echo "─── Change Repeat & Pause Delay ──────────────────────────────────────────"
+    echo "Current Defaults: Repeat: $REPEAT_COUNT times | Pause: ${REPEAT_DELAY_MS} ms"
+    echo "──────────────────────────────────────────────────────────────────────────"
+
+    local new_cnt
+    if ! prompt_number "Enter repeat count [1-100] (Press Enter for $REPEAT_COUNT, or 'c' to cancel): " 1 100 "$REPEAT_COUNT" new_cnt; then
+        return
+    fi
+    REPEAT_COUNT="$new_cnt"
+
+    local new_del
+    if ! prompt_number "Enter pause delay in milliseconds (minimum 50 ms) (Press Enter for ${REPEAT_DELAY_MS} ms, or 'c' to cancel): " 50 60000 "$REPEAT_DELAY_MS" new_del; then
+        return
+    fi
+    REPEAT_DELAY_MS="$new_del"
+
+    save_config
+    echo "Default timing updated to ${REPEAT_COUNT}x repeat and ${REPEAT_DELAY_MS} ms pause."
+
+    echo ""
+    read -r -p "Apply these settings to existing rules? (y/n) (or 'c' to return): " apply_confirm
+    if [ "$apply_confirm" = "y" ] || [ "$apply_confirm" = "Y" ] || [ "$apply_confirm" = "yes" ]; then
+        local updated_alerts=()
+        for alert in "${ALERTS[@]}"; do
+            parse_alert_entry "$alert"
+            updated_alerts+=("${PARSED_LVL}:${PARSED_TYP}:${new_cnt}:${new_del}:${PARSED_MSG}")
+        done
+        ALERTS=("${updated_alerts[@]}")
+        save_config
+        echo "  [✔] Applied ${new_cnt}x repeat and ${new_del} ms pause to all ${#ALERTS[@]} existing alert rules!"
+        read -r -p "Press [Enter] to return (or 'c')..."
+    fi
+}
+
+apply_timing_to_existing_rules() {
+    load_config
+    echo ""
+    echo "─── Apply Settings to Existing Rules ─────────────────────────────────────"
+    echo "Current settings: Repeat: $REPEAT_COUNT times | Pause: ${REPEAT_DELAY_MS} ms"
+    echo "Existing rules to update: ${#ALERTS[@]}"
+    echo "──────────────────────────────────────────────────────────────────────────"
+
+    local new_cnt
+    if ! prompt_number "Enter repeat count [1-100] (Press Enter for $REPEAT_COUNT, or 'c' to cancel): " 1 100 "$REPEAT_COUNT" new_cnt; then
+        return
+    fi
+
+    local new_del
+    if ! prompt_number "Enter pause delay in milliseconds (minimum 50 ms) (Press Enter for ${REPEAT_DELAY_MS} ms, or 'c' to cancel): " 50 60000 "$REPEAT_DELAY_MS" new_del; then
+        return
+    fi
+
+    echo ""
+    read -r -p "Apply ${new_cnt}x repeat and ${new_del} ms pause to all ${#ALERTS[@]} rules? (y/n) (or 'c' to cancel): " confirm
+    if [ "$confirm" = "c" ] || [ "$confirm" = "C" ]; then
+        echo "Cancelled."
+        return
+    fi
+
+    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || [ "$confirm" = "yes" ] || [ -z "$confirm" ]; then
+        REPEAT_COUNT="$new_cnt"
+        REPEAT_DELAY_MS="$new_del"
+        local updated_alerts=()
+        for alert in "${ALERTS[@]}"; do
+            parse_alert_entry "$alert"
+            updated_alerts+=("${PARSED_LVL}:${PARSED_TYP}:${new_cnt}:${new_del}:${PARSED_MSG}")
+        done
+        ALERTS=("${updated_alerts[@]}")
+        save_config
+        echo "  [✔] Applied ${new_cnt}x repeat and ${new_del} ms pause to all ${#ALERTS[@]} alert rules!"
+        read -r -p "Press [Enter] to return (or 'c')..."
+    else
+        echo "Cancelled without modifying existing rules."
+    fi
+}
+
+edit_volume_settings() {
+    load_config
+    local audio_info
+    audio_info=$(get_audio_settings)
+    local cur_vol
+    cur_vol=$(echo "$audio_info" | awk '{print $1}')
+
+    echo ""
+    echo "─── Volume Target Settings ───────────────────────────────────────────────"
+    echo "Current system volume: ${cur_vol}%"
+    echo "Volume target: ${ALERT_VOLUME}%"
+    echo ""
+    echo "Note: If your Mac is on mute or lower than the volume target, Battmon"
+    echo "unmutes and temporarily raises it, then automatically restores your"
+    echo "exact volume and mute state when done."
+    echo "──────────────────────────────────────────────────────────────────────────"
+
+    local new_v
+    if ! prompt_number "Enter volume target % [1-100] (Press Enter for ${ALERT_VOLUME}%, or 'c' to cancel): " 1 100 "$ALERT_VOLUME" new_v; then
+        return
+    fi
+    ALERT_VOLUME="$new_v"
+    RESTORE_VOLUME=true
+
+    save_config
+    echo "Volume target updated to ${ALERT_VOLUME}%."
+}
+
+reset_defaults() {
+    echo ""
+    echo "─── Reset Everything to Default ──────────────────────────────────────────"
+    echo "This will reset all alert rules, repeat count, delays, and volume target"
+    echo "back to the factory recommended defaults."
+    read -r -p "Are you sure you want to reset everything? (y/n) [or 'c' to cancel]: " confirm
+    if [ "$confirm" = "c" ] || [ "$confirm" = "C" ]; then
+        echo "Cancelled."
+        return
+    fi
+    if [[ "$confirm" =~ ^[Yy] ]]; then
+        REPEAT_COUNT=10
+        REPEAT_DELAY_MS=100
+        CHECK_INTERVAL_MS=200
+        ALERT_VOLUME=60
+        RESTORE_VOLUME=true
+        ALERTS=(
+            "100:HIGH:10:100:Battery is fully charged"
+            "80:HIGH:10:100:The battery is optimally charged"
+            "10:LOW:15:100:Charge up your battery"
+            "5:LOW:20:1000:Battery is critically low"
+            "1:LOW:20:800:Battery is critically low"
+        )
+        save_config
+        echo "All settings have been reset to default!"
+        read -r -p "Press [Enter] to return (or 'c')..."
+    else
+        echo "Reset cancelled."
+    fi
+}
+
+test_voice_interruption() {
+    load_config
+    echo ""
+    echo "─── Test Voice & Silencing Cutoffs ───────────────────────────────────────"
+    echo "  1) Speak a custom word or phrase once"
+    echo "  2) Speak an existing alert phrase once"
+    echo "  3) Test Charger Cutoff (Plug / Unplug test)"
+    echo "  4) Test Keyboard Mute & Volume Down Key Silencing"
+    echo "  5) Return to Main Menu"
+    echo "──────────────────────────────────────────────────────────────────────────"
+    local tchoice
+    if ! prompt_number "Enter choice [1-5] (or 'c' to cancel): " 1 5 "5" tchoice; then
+        return
+    fi
+
+    case "$tchoice" in
+        1)
+            read -r -p "Phrase to say (or 'c' to cancel): " custom_phrase
+            if [ "$custom_phrase" = "c" ] || [ "$custom_phrase" = "C" ]; then echo "Cancelled."; return; fi
+            if [ -n "$custom_phrase" ]; then
+                local audio_info
+                audio_info=$(get_audio_settings)
+                local orig_v orig_m
+                orig_v=$(echo "$audio_info" | awk '{print $1}')
+                orig_m=$(echo "$audio_info" | awk '{print $2}')
+
+                set_sys_muted false
+                if [ "$orig_v" -lt "$ALERT_VOLUME" ]; then set_sys_volume "$ALERT_VOLUME"; fi
+                echo "Speaking: \"$custom_phrase\" at ${ALERT_VOLUME}% volume..."
+                say "$custom_phrase"
+
+                set_sys_volume "$orig_v"
+                if [ "$orig_m" = "true" ]; then set_sys_muted true; fi
+                echo "Restored volume to ${orig_v}%."
+            fi
+            ;;
+        2)
+            local idx=1
+            for alert in "${ALERTS[@]}"; do
+                parse_alert_entry "$alert"
+                printf "  [%d] \"%s\"\n" "$idx" "$PARSED_MSG"
+                ((idx++))
+            done
+            local midx
+            if ! prompt_number "Choose message number [1-${#ALERTS[@]}] (or 'c' to cancel): " 1 "${#ALERTS[@]}" "" midx; then
+                return
+            fi
+
+            parse_alert_entry "${ALERTS[$((midx - 1))]}"
+            local audio_info
+            audio_info=$(get_audio_settings)
+            local orig_v orig_m
+            orig_v=$(echo "$audio_info" | awk '{print $1}')
+            orig_m=$(echo "$audio_info" | awk '{print $2}')
+
+            set_sys_muted false
+            if [ "$orig_v" -lt "$ALERT_VOLUME" ]; then set_sys_volume "$ALERT_VOLUME"; fi
+            echo "Speaking: \"$PARSED_MSG\"..."
+            say "$PARSED_MSG"
+
+            set_sys_volume "$orig_v"
+            if [ "$orig_m" = "true" ]; then set_sys_muted true; fi
+            echo "Restored volume to ${orig_v}%."
+            ;;
+        3)
+            echo "─── Live Charger Cutoff Test ─────────────────────────────────────────────"
+            local test_type="LOW"
+            local test_msg="Charge up your battery"
+            if is_ac_power; then
+                test_type="HIGH"
+                test_msg="The battery is optimally charged"
+                echo "Status: PLUGGED IN. Unplug charger anytime to verify cutoff!"
+            else
+                test_type="LOW"
+                test_msg="Charge up your battery"
+                echo "Status: ON BATTERY. Plug in charger anytime to verify cutoff!"
+            fi
+            echo "──────────────────────────────────────────────────────────────────────────"
+            read -r -p "Press [Enter] to begin test (or 'c' to cancel)..." start_key
+            if [ "$start_key" = "c" ] || [ "$start_key" = "C" ]; then echo "Cancelled."; return; fi
+
+            local audio_info
+            audio_info=$(get_audio_settings)
+            local orig_v orig_m
+            orig_v=$(echo "$audio_info" | awk '{print $1}')
+            orig_m=$(echo "$audio_info" | awk '{print $2}')
+
+            set_sys_muted false
+            if [ "$orig_v" -lt "$ALERT_VOLUME" ]; then set_sys_volume "$ALERT_VOLUME"; fi
+
+            restore_test_vol() {
+                set_sys_volume "$orig_v"
+                if [ "$orig_m" = "true" ]; then set_sys_muted true; fi
+                echo "Volume restored to ${orig_v}%."
+            }
+
+            local check_sec
+            check_sec=$(awk -v ms="$CHECK_INTERVAL_MS" 'BEGIN { printf "%.3f", ms / 1000 }')
+            local check_count
+            check_count=$(awk -v d="$REPEAT_DELAY_MS" -v c="$CHECK_INTERVAL_MS" 'BEGIN { r = int(d / c); if (r < 1) r = 1; print r }')
+
+            for ((i=1; i<=10; i++)); do
+                echo "[Rep $i/10] Speaking..."
+                say "$test_msg" &
+                local say_pid=$!
+
+                while kill -0 "$say_pid" 2>/dev/null; do
+                    if [ "$test_type" = "LOW" ] && is_ac_power; then
+                        kill -9 "$say_pid" 2>/dev/null
+                        wait "$say_pid" 2>/dev/null
+                        echo ">>> SUCCESS! Charger connected! Cut off immediately."
+                        restore_test_vol
+                        return
+                    fi
+                    if [ "$test_type" = "HIGH" ] && ! is_ac_power; then
+                        kill -9 "$say_pid" 2>/dev/null
+                        wait "$say_pid" 2>/dev/null
+                        echo ">>> SUCCESS! Charger disconnected! Cut off immediately."
+                        restore_test_vol
+                        return
+                    fi
+                    sleep "$check_sec"
+                done
+
+                for ((c=0; c<check_count; c++)); do
+                    if [ "$test_type" = "LOW" ] && is_ac_power; then
+                        echo ">>> SUCCESS! Charger connected during pause! Stopped."
+                        restore_test_vol
+                        return
+                    fi
+                    if [ "$test_type" = "HIGH" ] && ! is_ac_power; then
+                        echo ">>> SUCCESS! Charger disconnected during pause! Stopped."
+                        restore_test_vol
+                        return
+                    fi
+                    sleep "$check_sec"
+                done
+            done
+            restore_test_vol
+            ;;
+        4)
+            echo "─── Keyboard Mute & Volume Down Key Test ─────────────────────────────────"
+            echo "While it speaks: Press MUTE (F10) or VOLUME DOWN (F11) on keyboard!"
+            echo "──────────────────────────────────────────────────────────────────────────"
+            read -r -p "Press [Enter] to begin test (or 'c' to cancel)..." start_key
+            if [ "$start_key" = "c" ] || [ "$start_key" = "C" ]; then echo "Cancelled."; return; fi
+
+            local audio_info
+            audio_info=$(get_audio_settings)
+            local orig_v orig_m
+            orig_v=$(echo "$audio_info" | awk '{print $1}')
+            orig_m=$(echo "$audio_info" | awk '{print $2}')
+
+            set_sys_muted false
+            if [ "$orig_v" -lt "$ALERT_VOLUME" ]; then
+                set_sys_volume "$ALERT_VOLUME"
+                local active_v="$ALERT_VOLUME"
+            else
+                local active_v="$orig_v"
+            fi
+
+            local check_sec
+            check_sec=$(awk -v ms="$CHECK_INTERVAL_MS" 'BEGIN { printf "%.3f", ms / 1000 }')
+            local check_count
+            check_count=$(awk -v d="$REPEAT_DELAY_MS" -v c="$CHECK_INTERVAL_MS" 'BEGIN { r = int(d / c); if (r < 1) r = 1; print r }')
+
+            for ((i=1; i<=10; i++)); do
+                echo "[Rep $i/10] Speaking... Press MUTE or VOLUME DOWN now!"
+                say "Charge up your battery now" &
+                local say_pid=$!
+
+                while kill -0 "$say_pid" 2>/dev/null; do
+                    local cur_info
+                    cur_info=$(get_audio_settings)
+                    local cv cm
+                    cv=$(echo "$cur_info" | awk '{print $1}')
+                    cm=$(echo "$cur_info" | awk '{print $2}')
+
+                    if [ "$cm" = "true" ]; then
+                        kill -9 "$say_pid" 2>/dev/null
+                        wait "$say_pid" 2>/dev/null
+                        echo ">>> SUCCESS! Mute key detected! Cut off instantly; Mac remains muted."
+                        return
+                    fi
+                    if [ -n "$cv" ] && [ "$cv" -lt "$((active_v - 3))" ]; then
+                        kill -9 "$say_pid" 2>/dev/null
+                        wait "$say_pid" 2>/dev/null
+                        echo ">>> SUCCESS! Volume Down detected (dropped to ${cv}%)! Cut off instantly."
+                        return
+                    fi
+                    sleep "$check_sec"
+                done
+
+                for ((c=0; c<check_count; c++)); do
+                    local cur_info
+                    cur_info=$(get_audio_settings)
+                    local cv cm
+                    cv=$(echo "$cur_info" | awk '{print $1}')
+                    cm=$(echo "$cur_info" | awk '{print $2}')
+
+                    if [ "$cm" = "true" ]; then
+                        echo ">>> SUCCESS! Mute key detected during pause! Mac remains muted."
+                        return
+                    fi
+                    if [ -n "$cv" ] && [ "$cv" -lt "$((active_v - 3))" ]; then
+                        echo ">>> SUCCESS! Volume Down detected during pause! Kept at ${cv}%."
+                        return
+                    fi
+                    sleep "$check_sec"
+                done
+            done
+            ;;
+        *)
+            return
+            ;;
+    esac
+}
+
+service_menu() {
+    while true; do
+        echo ""
+        echo "─── Background Service Controls ──────────────────────────────────────────"
+        echo "  1) Start background service (auto-starts on boot)"
+        echo "  2) Stop background service"
+        echo "  3) Restart service"
+        echo "  4) Trigger one immediate battery check now"
+        echo "  5) Return to Main Menu"
+        echo "──────────────────────────────────────────────────────────────────────────"
+        local schoice
+        if ! prompt_number "Enter choice [1-5] (or 'c' to cancel): " 1 5 "5" schoice; then
+            return
+        fi
+
+        case "$schoice" in
+            1) service_install ;;
+            2) service_stop ;;
+            3) service_restart ;;
+            4)
+                echo "Running monitor check..."
+                /bin/bash "$RUNTIME_DIR/battery_monitor.sh"
+                echo "Done. State: $(cat "$STATE_FILE" 2>/dev/null || echo 'none')"
+                ;;
+            5) break ;;
+        esac
+    done
+}
+
+main_menu() {
+    while true; do
+        load_config
+        local pct
+        pct=$(get_battery_percent)
+        local pwr="On Battery"
+        if is_ac_power; then pwr="Currently Charging"; fi
+        local audio_info
+        audio_info=$(get_audio_settings)
+        local cur_v
+        cur_v=$(echo "$audio_info" | awk '{print $1}')
+
+        clear 2>/dev/null || echo ""
+        echo "─── BATTMON 🦇 Battery Voice Monitor ─────────────────────────────────────"
+        local bat_str=" Battery: ${pct}% (${pwr})"
+        local vol_str=" Volume target: ${ALERT_VOLUME}%"
+        printf "%-36s | Current system volume: %s%%\n" "$bat_str" "${cur_v}"
+        printf "%-36s | Silencing: Charger or MUTE/VOL-DOWN\n" "$vol_str"
+        echo "──────────────────────────────────────────────────────────────────────────"
+        echo " Configured Alerts:"
+        local idx=0
+        local max_preview=6
+        for alert in "${ALERTS[@]}"; do
+            ((idx++))
+            if [ $idx -gt $max_preview ] && [ "${#ALERTS[@]}" -gt $max_preview ]; then
+                local remain=$((${#ALERTS[@]} - max_preview))
+                printf "    (... and %d more alerts - view all via option 4)\n" "$remain"
+                break
+            fi
+            parse_alert_entry "$alert"
+            local trunc_msg="$PARSED_MSG"
+            if [ "${#trunc_msg}" -gt 33 ]; then trunc_msg="${trunc_msg:0:30}..."; fi
+            printf "  • %3d%% [%-4s] %2sx %4sms \"%s\"\n" "$PARSED_LVL" "$PARSED_TYP" "$PARSED_REP" "$PARSED_DEL" "$trunc_msg"
+        done
+        echo "──────────────────────────────────────────────────────────────────────────"
+        printf "  1) Edit an alert rule            7) Change volume target\n"
+        printf "  2) Add new battery alert         8) Test voice & silencing keys\n"
+        printf "  3) Delete an alert rule          9) Background service controls\n"
+        printf "  4) View all alerts & status     10) Reset everything to default\n"
+        printf "  5) Change repeat & pause delay  11) Exit Battmon\n"
+        printf "  6) Apply to existing rules\n"
+        echo "──────────────────────────────────────────────────────────────────────────"
+        read -r -p " Enter choice [1-11] (or 'c' to exit): " choice
+
+        if [ "$choice" = "c" ] || [ "$choice" = "C" ]; then
+            echo "Goodbye!"
+            exit 0
+        fi
+
+        case "$choice" in
+            1) edit_alert ;;
+            2) add_alert ;;
+            3) delete_alert ;;
+            4)
+                show_status
+                read -r -p "Press [Enter] to return (or 'c')..."
+                ;;
+            5) edit_timing ;;
+            6) apply_timing_to_existing_rules ;;
+            7) edit_volume_settings ;;
+            8) test_voice_interruption ;;
+            9) service_menu ;;
+            10) reset_defaults ;;
+            11)
+                echo "Goodbye!"
+                exit 0
+                ;;
+            *)
+                echo "Please enter a number between 1 and 11 (or 'c' to exit)."
+                sleep 0.8
+                ;;
+        esac
+    done
+}
+
+case "$1" in
+    -h|--help|help)
+        show_help
+        ;;
+    status)
+        show_status
+        ;;
+    install|start)
+        service_install
+        ;;
+    stop)
+        service_stop
+        ;;
+    restart)
+        service_restart
+        ;;
+    run)
+        sync_runtime_files
+        /bin/bash "$RUNTIME_DIR/battery_monitor.sh"
+        ;;
+    test)
+        test_voice_interruption
+        ;;
+    reset)
+        reset_defaults
+        ;;
+    symlinks)
+        install_symlinks
+        ;;
+    edit)
+        "${EDITOR:-nano}" "$CONFIG_FILE"
+        sync_runtime_files
+        ;;
+    *)
+        main_menu
+        ;;
+esac
