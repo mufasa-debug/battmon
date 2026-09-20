@@ -99,6 +99,11 @@ run_monitor() {
         TEST_SESSION_LOCKED="${TEST_SESSION_LOCKED:-0}" \
         TEST_SESSION_STATE_UNKNOWN="${TEST_SESSION_STATE_UNKNOWN:-0}" \
         TEST_IOREG_LARGE_OUTPUT="${TEST_IOREG_LARGE_OUTPUT:-0}" \
+        TEST_ADAPTER_CONNECTED="${TEST_ADAPTER_CONNECTED:-}" \
+        TEST_CHARGER_FLAG="${TEST_CHARGER_FLAG:-$CASE_HOME/charger-connected.flag}" \
+        TEST_UNPLUG_FLAG="${TEST_UNPLUG_FLAG:-$CASE_HOME/charger-disconnected.flag}" \
+        TEST_CONNECT_CHARGER_DURING_SAY="${TEST_CONNECT_CHARGER_DURING_SAY:-0}" \
+        TEST_DISCONNECT_CHARGER_DURING_SAY="${TEST_DISCONNECT_CHARGER_DURING_SAY:-0}" \
         TEST_SYSTEM_UPTIME_SECONDS="${TEST_SYSTEM_UPTIME_SECONDS:-86400}" \
         TEST_CHROME_MEDIA_COUNT="${TEST_CHROME_MEDIA_COUNT:-0}" \
         TEST_BRAVE_MEDIA_COUNT="${TEST_BRAVE_MEDIA_COUNT:-0}" \
@@ -344,6 +349,35 @@ if [ "$(wc -l < "$SAY_LOG" | tr -d ' ')" = "3" ] && \
     pass "unlimited alert pauses media, stops on Volume Down, restores, and resumes in order"
 else
     fail "unlimited alert pauses media, stops on Volume Down, restores, and resumes in order"
+fi
+
+# A newly connected adapter must stop a LOW alert during the active sentence,
+# even if pmset still reports the previous battery state for that instant.
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "5:LOW:20:100:stop when plugged in"
+write_state "$CASE_HOME/.battmon/state" 6 "" "" discharging BATTERY
+TEST_CONNECT_CHARGER_DURING_SAY=1 TEST_POWER_SOURCE=Battery \
+    TEST_BATTERY_PERCENT=5 TEST_BATTERY_MODE=discharging run_monitor
+if [ "$(wc -l < "$SAY_LOG" | tr -d ' ')" = "1" ] && \
+    grep -q '\[Alert Cutoff\] charger connected during repetition 1' \
+        "$CASE_HOME/logs/battmon.log"; then
+    pass "LOW alert stops mid-sentence from the direct adapter signal"
+else
+    fail "LOW alert stops mid-sentence from the direct adapter signal"
+fi
+
+# The same direct signal must stop a HIGH alert as soon as the adapter leaves.
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "80:HIGH:20:100:stop when unplugged"
+write_state "$CASE_HOME/.battmon/state" 79 "" "" charging AC
+TEST_DISCONNECT_CHARGER_DURING_SAY=1 TEST_POWER_SOURCE=AC \
+    TEST_BATTERY_PERCENT=80 TEST_BATTERY_MODE=charging run_monitor
+if [ "$(wc -l < "$SAY_LOG" | tr -d ' ')" = "1" ] && \
+    grep -q '\[Alert Cutoff\] charger disconnected during repetition 1' \
+        "$CASE_HOME/logs/battmon.log"; then
+    pass "HIGH alert stops mid-sentence from the direct adapter signal"
+else
+    fail "HIGH alert stops mid-sentence from the direct adapter signal"
 fi
 
 # Browser media is marked per element so only what Battmon paused is resumed.

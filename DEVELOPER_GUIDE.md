@@ -105,6 +105,8 @@ Signal handlers exit with conventional status codes. The EXIT cleanup stops the 
 
 For an unlimited rule (`REPEAT_COUNT=0`), the same loop continues without a numeric limit. The charger, Mute, Volume Down, and signal checks remain active during speech and between repetitions.
 
+Charger interruption uses two independent signals: the normal `pmset` battery state and `AppleSmartBattery`'s `ExternalConnected` registry value. The direct registry check closes the short window where macOS has physically accepted a USB-C or MagSafe transition but `pmset` still reports the previous source, allowing Battmon to kill the current sentence instead of waiting for the next repetition.
+
 ### Media pause and restoration
 
 `PAUSE_MEDIA=true` enables explicit control of Apple Music, Spotify, the front playing document in QuickTime Player, and HTML audio/video in Chrome, Brave, Safari, Edge, Vivaldi, and Chromium. Before speech, the monitor:

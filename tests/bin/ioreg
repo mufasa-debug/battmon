@@ -1,5 +1,22 @@
 #!/bin/bash
 
+if [[ "$*" == *"AppleSmartBattery"* ]]; then
+    adapter_connected="${TEST_ADAPTER_CONNECTED:-}"
+    if [ -n "${TEST_UNPLUG_FLAG:-}" ] && [ -f "$TEST_UNPLUG_FLAG" ]; then
+        adapter_connected=0
+    elif [ -n "${TEST_CHARGER_FLAG:-}" ] && [ -f "$TEST_CHARGER_FLAG" ]; then
+        adapter_connected=1
+    elif [ -z "$adapter_connected" ]; then
+        [ "${TEST_POWER_SOURCE:-Battery}" = "AC" ] && adapter_connected=1 || adapter_connected=0
+    fi
+    if [ "$adapter_connected" = "1" ]; then
+        printf '%s\n' '    "ExternalConnected" = Yes'
+    else
+        printf '%s\n' '    "ExternalConnected" = No'
+    fi
+    exit 0
+fi
+
 if [ "${TEST_SESSION_STATE_UNKNOWN:-0}" = "1" ]; then
     exit 1
 elif [ "${TEST_SESSION_LOCKED:-0}" = "1" ]; then

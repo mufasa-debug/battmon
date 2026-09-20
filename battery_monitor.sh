@@ -535,8 +535,34 @@ power_should_cutoff() {
     return 1
 }
 
+adapter_connection_state() {
+    # pmset can briefly lag behind a physical USB-C/MagSafe transition. The
+    # battery registry exposes the adapter connection independently, allowing
+    # an active sentence to be stopped as soon as the hardware reports it.
+    ioreg -r -n AppleSmartBattery -w 0 -l 2>/dev/null | LC_ALL=C awk '
+        /"ExternalConnected"[[:space:]]*=[[:space:]]*(Yes|true|1)/ {
+            print "connected"
+            exit
+        }
+        /"ExternalConnected"[[:space:]]*=[[:space:]]*(No|false|0)/ {
+            print "disconnected"
+            exit
+        }
+    '
+}
+
 poll_for_interrupt() {
-    local type="$1" start_source="$2"
+    local type="$1" start_source="$2" adapter_state
+    adapter_state=$(adapter_connection_state)
+    if [ "$type" = "LOW" ] && [ "$start_source" = "BATTERY" ] && \
+        [ "$adapter_state" = "connected" ]; then
+        INTERRUPT_REASON="charger connected"
+        return 0
+    fi
+    if [ "$type" = "HIGH" ] && [ "$adapter_state" = "disconnected" ]; then
+        INTERRUPT_REASON="charger disconnected"
+        return 0
+    fi
     if get_battery_state && power_should_cutoff "$type" "$start_source"; then
         return 0
     fi

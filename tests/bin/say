@@ -5,6 +5,16 @@ fi
 if [ -n "${TEST_EVENT_LOG:-}" ]; then
     printf 'say:%s\n' "$*" >> "$TEST_EVENT_LOG"
 fi
+if [ "${TEST_CONNECT_CHARGER_DURING_SAY:-0}" = "1" ] && \
+    [ -n "${TEST_CHARGER_FLAG:-}" ]; then
+    : > "$TEST_CHARGER_FLAG"
+    /bin/sleep 0.5
+fi
+if [ "${TEST_DISCONNECT_CHARGER_DURING_SAY:-0}" = "1" ] && \
+    [ -n "${TEST_UNPLUG_FLAG:-}" ]; then
+    : > "$TEST_UNPLUG_FLAG"
+    /bin/sleep 0.5
+fi
 if [[ "${TEST_INTERRUPT_AFTER_SAYS:-0}" =~ ^[0-9]+$ ]] && \
     [ "${TEST_INTERRUPT_AFTER_SAYS:-0}" -gt 0 ] && \
     [ -n "${TEST_SAY_LOG:-}" ] && \
