@@ -1,39 +1,35 @@
-============================================================
-  BATTMON: QUICK SETUP GUIDE (FOR ANY MAC)
-============================================================
+BATTMON QUICK SETUP
+===================
 
-1. OPEN TERMINAL AT THIS FOLDER:
-   • Easy method: Open Terminal, type "cd " (with a space),
-     then drag and drop this Battmon folder into Terminal,
-     and hit Enter.
-   • Or right-click this folder -> Services -> "New Terminal at Folder"
+1. Open Terminal in this Battmon folder.
+2. Run:
 
-2. RUN INSTALLATION (ONE COPY-PASTE COMMAND):
-   chmod +x setup.sh battmon battery_monitor.sh && ./setup.sh
+   chmod +x setup.sh battmon battery_monitor.sh
+   ./setup.sh
 
-3. CHOOSE SETUP OPTION:
-   • Press 1 for Quick Install (Default alerts: 100%, 80%, 10%, 5%, 1%)
-   • Press 2 for Custom Setup (Set custom percentages like 67%, 82%)
+The installer preserves an existing active configuration, creates a backup,
+installs one command (`battmon`), validates the LaunchAgent, and starts the
+background monitor.
 
-============================================================
-  USAGE (RUN FROM ANY TERMINAL WINDOW AFTER INSTALL)
-============================================================
+Install without starting the service:
 
-• Open interactive menu:
-  battmon
+   ./setup.sh --no-start
 
-• Test speech & key silencing (Mute / Volume Down / Charger):
-  battmon test
+Useful commands:
 
-• Check battery status & rules:
-  battmon status
+   battmon             Open the interactive manager
+   battmon status      Show current state and every alert
+   battmon doctor      Run read-only health checks
+   battmon test        Test speech and interruption controls
+   battmon start       Enable background monitoring
+   battmon stop        Stop background monitoring
 
-• View all commands:
-  battmon --help
+The default alert pause is 100 ms. The manager accepts values down to 50 ms.
 
-============================================================
-  UNINSTALLATION
-============================================================
+Safe uninstall (configuration preserved):
 
-From this folder, run:
-  ./setup.sh --uninstall
+   ./setup.sh --uninstall
+
+Full removal with a configuration backup:
+
+   ./setup.sh --uninstall --purge

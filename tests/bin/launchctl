@@ -1,0 +1,5 @@
+#!/bin/bash
+case "${1:-}" in
+    print|list) exit 1 ;;
+    *) exit 0 ;;
+esac

@@ -1,0 +1,5 @@
+#!/bin/bash
+if [ -n "${TEST_SAY_LOG:-}" ]; then
+    printf '%s\n' "$*" >> "$TEST_SAY_LOG"
+fi
+exit 0

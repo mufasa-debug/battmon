@@ -1,0 +1,8 @@
+#!/bin/bash
+case "$*" in
+    *"get {output volume, output muted}"*)
+        [ "${TEST_AUDIO_FAIL:-0}" = "1" ] && exit 1
+        printf '%s, %s\n' "${TEST_AUDIO_VOLUME:-80}" "${TEST_AUDIO_MUTED:-false}"
+        ;;
+    *) exit 0 ;;
+esac

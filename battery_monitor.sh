@@ -1,319 +1,395 @@
 #!/bin/bash
-# ==============================================================================
-# Battmon - Battery Monitor Background Engine
-# Universal for any macOS machine
-# ==============================================================================
+# Battmon background evaluation and interruptible speech engine.
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="$DIR/battery_config.sh"
+umask 077
 
-if [ ! -f "$CONFIG_FILE" ]; then
-    CONFIG_FILE="$HOME/.battmon/battery_config.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_FILE="$SCRIPT_DIR/battmon_common.sh"
+if [ ! -f "$COMMON_FILE" ]; then
+    printf 'Battmon: missing %s\n' "$COMMON_FILE" >&2
+    exit 2
 fi
-if [ ! -f "$CONFIG_FILE" ]; then
-    CONFIG_FILE="$HOME/.batmon/battery_config.sh"
-fi
+source "$COMMON_FILE" || exit 2
 
-if [ ! -f "$CONFIG_FILE" ]; then
-    exit 1
-fi
-
-source "$CONFIG_FILE"
-
-REPEAT_COUNT="${REPEAT_COUNT:-10}"
-REPEAT_DELAY_MS="${REPEAT_DELAY_MS:-100}"
-CHECK_INTERVAL_MS="${CHECK_INTERVAL_MS:-200}"
-ALERT_VOLUME="${ALERT_VOLUME:-60}"
-RESTORE_VOLUME=true
-
+SAY_PID=""
+LOCK_HELD=0
+AUDIO_MODIFIED=0
 ORIG_VOL=""
 ORIG_MUTED=""
 ACTIVE_ALERT_VOL=""
-VOL_MODIFIED=0
+USER_SILENCED=0
 
-get_audio_settings() {
-    osascript -e "get {output volume, output muted} of (get volume settings)" 2>/dev/null | tr -d ','
+release_monitor_lock() {
+    [ "$LOCK_HELD" -eq 1 ] || return 0
+    rm -f "$BATTMON_MONITOR_LOCK/pid" 2>/dev/null || true
+    rmdir "$BATTMON_MONITOR_LOCK" 2>/dev/null || true
+    LOCK_HELD=0
 }
 
-set_sys_volume() {
-    local v="$1"
-    osascript -e "set volume output volume $v" 2>/dev/null || true
-}
-
-set_sys_muted() {
-    local m="$1"
-    osascript -e "set volume output muted $m" 2>/dev/null || true
-}
-
-prepare_volume() {
-    local target_vol="${ALERT_VOLUME:-60}"
-    local audio_info
-    audio_info=$(get_audio_settings)
-    ORIG_VOL=$(echo "$audio_info" | awk '{print $1}')
-    ORIG_MUTED=$(echo "$audio_info" | awk '{print $2}')
-    ORIG_VOL="${ORIG_VOL:-50}"
-    ORIG_MUTED="${ORIG_MUTED:-false}"
-
-    local need_change=0
-    if [ "$ORIG_MUTED" = "true" ]; then
-        set_sys_muted false
-        need_change=1
-    fi
-
-    if [ "$ORIG_VOL" -lt "$target_vol" ]; then
-        set_sys_volume "$target_vol"
-        need_change=1
-        ACTIVE_ALERT_VOL="$target_vol"
+restore_audio() {
+    [ "$AUDIO_MODIFIED" -eq 1 ] || return 0
+    if restore_sys_audio "$ORIG_VOL" "$ORIG_MUTED"; then
+        log_event "[Audio] Restored volume=${ORIG_VOL} muted=${ORIG_MUTED}"
     else
-        ACTIVE_ALERT_VOL="$ORIG_VOL"
+        log_event "[Warning] Could not restore audio state"
     fi
-
-    if [ $need_change -eq 1 ]; then
-        VOL_MODIFIED=1
-    fi
+    AUDIO_MODIFIED=0
 }
 
-restore_volume() {
-    if [ $VOL_MODIFIED -eq 1 ]; then
-        if [ -n "$ORIG_VOL" ]; then
-            set_sys_volume "$ORIG_VOL"
-        fi
-        if [ "$ORIG_MUTED" = "true" ]; then
-            set_sys_muted true
-        fi
-        VOL_MODIFIED=0
+stop_speech() {
+    if [ -n "$SAY_PID" ] && kill -0 "$SAY_PID" 2>/dev/null; then
+        kill -TERM "$SAY_PID" 2>/dev/null || true
+        wait "$SAY_PID" 2>/dev/null || true
     fi
+    SAY_PID=""
 }
 
-LOCK_DIR="/tmp/battmon.lock"
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    LOCK_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null)
-    if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
-        exit 0
-    else
-        rm -rf "$LOCK_DIR"
-        mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+cleanup() {
+    stop_speech
+    if [ "$USER_SILENCED" -eq 0 ]; then
+        restore_audio
     fi
-fi
-echo $$ > "$LOCK_DIR/pid"
-
-trap 'restore_volume; rm -rf "$LOCK_DIR"' EXIT INT TERM
-
-STATE_FILE="$HOME/.battmon_state"
-
-is_ac_power() {
-    pmset -g batt | grep -q 'AC Power'
+    release_monitor_lock
 }
 
-BATT_INFO=$(pmset -g batt)
-PERCENT=$(echo "$BATT_INFO" | grep -Eo "[0-9]+%" | head -n 1 | tr -d '%')
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
-if [ -z "$PERCENT" ] || ! [[ "$PERCENT" =~ ^[0-9]+$ ]]; then
-    exit 0
-fi
+acquire_monitor_lock() {
+    ensure_runtime_dirs || return 1
+    if mkdir "$BATTMON_MONITOR_LOCK" 2>/dev/null; then
+        printf '%s\n' "$$" > "$BATTMON_MONITOR_LOCK/pid"
+        LOCK_HELD=1
+        return 0
+    fi
+
+    local lock_pid="" lock_command=""
+    lock_pid=$(sed -n '1p' "$BATTMON_MONITOR_LOCK/pid" 2>/dev/null || true)
+    if [[ "$lock_pid" =~ ^[0-9]+$ ]] && kill -0 "$lock_pid" 2>/dev/null; then
+        lock_command=$(ps -p "$lock_pid" -o command= 2>/dev/null || true)
+        case "$lock_command" in
+            *battery_monitor.sh*) return 2 ;;
+        esac
+    fi
+
+    rm -f "$BATTMON_MONITOR_LOCK/pid" 2>/dev/null || true
+    rmdir "$BATTMON_MONITOR_LOCK" 2>/dev/null || return 1
+    mkdir "$BATTMON_MONITOR_LOCK" 2>/dev/null || return 1
+    printf '%s\n' "$$" > "$BATTMON_MONITOR_LOCK/pid"
+    LOCK_HELD=1
+}
 
 LAST_PERCENT=""
-LAST_ALERTED_LEVEL=""
-LAST_ALERTED_TYPE=""
-if [ -f "$STATE_FILE" ]; then
-    IFS=":" read -r LAST_PERCENT LAST_ALERTED_LEVEL LAST_ALERTED_TYPE < "$STATE_FILE" 2>/dev/null
-fi
+LAST_ALERT_LEVEL=""
+LAST_ALERT_TYPE=""
+LAST_MODE=""
+LAST_SOURCE=""
 
-format_speech_msg() {
-    local raw_msg="$1"
-    local lvl="$2"
-    local cur="$3"
-    local res="$raw_msg"
-
-    res="${res//\{percent\}/$cur}"
-    res="${res//\{level\}/$cur}"
-    res="${res//\{pct\}/$cur}"
-
-    if [ -n "$lvl" ] && [[ "$cur" =~ ^[0-9]+$ ]] && [ "$lvl" -ne "$cur" ]; then
-        res="${res//${lvl} percent/${cur} percent}"
-        res="${res//${lvl} Percent/${cur} Percent}"
-        res="${res//${lvl}%/${cur}%}"
-        res="${res//at ${lvl}/at ${cur}}"
-        res="${res//is ${lvl}/is ${cur}}"
-        res=$(echo "$res" | sed -E "s/(^|[[:space:]])${lvl}([[:space:]]|%|\$)/\1${cur}\2/g")
+load_state() {
+    [ -f "$BATTMON_STATE_FILE" ] || return 0
+    local first_line key value
+    first_line=$(sed -n '1p' "$BATTMON_STATE_FILE" 2>/dev/null || true)
+    if [[ "$first_line" == *:* ]]; then
+        IFS=":" read -r LAST_PERCENT LAST_ALERT_LEVEL LAST_ALERT_TYPE <<< "$first_line"
+        return 0
     fi
-    echo "$res"
+
+    while IFS="=" read -r key value; do
+        case "$key" in
+            LAST_PERCENT) LAST_PERCENT="$value" ;;
+            LAST_ALERT_LEVEL) LAST_ALERT_LEVEL="$value" ;;
+            LAST_ALERT_TYPE) LAST_ALERT_TYPE="$value" ;;
+            LAST_MODE) LAST_MODE="$value" ;;
+            LAST_SOURCE) LAST_SOURCE="$value" ;;
+        esac
+    done < "$BATTMON_STATE_FILE"
+
+    [[ "$LAST_PERCENT" =~ ^[0-9]+$ ]] || LAST_PERCENT=""
+    [[ "$LAST_ALERT_LEVEL" =~ ^[0-9]+$ ]] || LAST_ALERT_LEVEL=""
+    case "$LAST_ALERT_TYPE" in LOW|HIGH|"") ;; *) LAST_ALERT_TYPE="" ;; esac
+    case "$LAST_MODE" in charging|charged|discharging|unknown|"") ;; *) LAST_MODE="" ;; esac
+    case "$LAST_SOURCE" in AC|BATTERY|UNKNOWN|"") ;; *) LAST_SOURCE="" ;; esac
 }
 
-repeat_speech() {
-    local base_msg="$1"
-    local type="$2"
-    local count="$3"
-    local delay_ms="$4"
-    local check_ms="$5"
-    local rule_level="$6"
-
-    local speak_check_sec
-    speak_check_sec=$(awk -v ms="$check_ms" 'BEGIN { printf "%.3f", ms / 1000 }')
-
-    local pause_poll_ms="$check_ms"
-    if [ "$delay_ms" -lt "$pause_poll_ms" ]; then
-        pause_poll_ms="$delay_ms"
-    fi
-    local pause_check_sec
-    pause_check_sec=$(awk -v ms="$pause_poll_ms" 'BEGIN { printf "%.3f", ms / 1000 }')
-    local pause_check_count
-    pause_check_count=$(awk -v d="$delay_ms" -v p="$pause_poll_ms" 'BEGIN { r = int(d / p); if (r < 1) r = 1; print r }')
-
-    prepare_volume
-    echo "[$(date '+%H:%M:%S')] [Alert Started] Rule ${rule_level}% (${type}) | ${count}x repeat | ${delay_ms}ms pause" >> /tmp/battmon.log
-
-    for ((i=1; i<=count; i++)); do
-        if [ "$type" = "LOW" ] && is_ac_power; then
-            echo "[$(date '+%H:%M:%S')] [Alert Cutoff] Charger connected before rep $i" >> /tmp/battmon.log
-            return 0
-        fi
-        if [ "$type" = "HIGH" ] && ! is_ac_power; then
-            echo "[$(date '+%H:%M:%S')] [Alert Cutoff] Charger disconnected before rep $i" >> /tmp/battmon.log
-            return 0
-        fi
-
-        local live_pct
-        live_pct=$(pmset -g batt | grep -Eo "[0-9]+%" | head -n 1 | tr -d '%')
-        if [ -z "$live_pct" ] || ! [[ "$live_pct" =~ ^[0-9]+$ ]]; then
-            live_pct="${rule_level:-$PERCENT}"
-        fi
-
-        local spoken_msg
-        spoken_msg=$(format_speech_msg "$base_msg" "$rule_level" "$live_pct")
-
-        echo "$live_pct:$rule_level:$type" > "$STATE_FILE"
-        echo "[$(date '+%H:%M:%S')] [Rep $i/$count] Speaking: \"$spoken_msg\" (Battery: ${live_pct}%)" >> /tmp/battmon.log
-
-        local audio_check
-        audio_check=$(get_audio_settings)
-        local cur_v cur_m
-        cur_v=$(echo "$audio_check" | awk '{print $1}')
-        cur_m=$(echo "$audio_check" | awk '{print $2}')
-        if [ "$cur_m" = "true" ]; then
-            echo "[$(date '+%H:%M:%S')] [Alert Cutoff] Silenced via MUTE before speaking rep $i" >> /tmp/battmon.log
-            VOL_MODIFIED=0
-            return 0
-        fi
-        if [[ "$cur_v" =~ ^[0-9]+$ ]] && [ -n "$ACTIVE_ALERT_VOL" ] && [ "$cur_v" -le "$((ACTIVE_ALERT_VOL - 6))" ]; then
-            echo "[$(date '+%H:%M:%S')] [Alert Cutoff] Silenced via VOLUME DOWN before speaking rep $i ($cur_v% <= $((ACTIVE_ALERT_VOL - 6))%)" >> /tmp/battmon.log
-            VOL_MODIFIED=0
-            return 0
-        fi
-
-        say "$spoken_msg" &
-        local say_pid=$!
-
-        while kill -0 "$say_pid" 2>/dev/null; do
-            if [ "$type" = "LOW" ] && is_ac_power; then
-                echo "[$(date '+%H:%M:%S')] [Alert Cutoff] Charger connected while speaking rep $i" >> /tmp/battmon.log
-                kill -9 "$say_pid" 2>/dev/null
-                wait "$say_pid" 2>/dev/null
-                return 0
-            fi
-            if [ "$type" = "HIGH" ] && ! is_ac_power; then
-                echo "[$(date '+%H:%M:%S')] [Alert Cutoff] Charger disconnected while speaking rep $i" >> /tmp/battmon.log
-                kill -9 "$say_pid" 2>/dev/null
-                wait "$say_pid" 2>/dev/null
-                return 0
-            fi
-
-            audio_check=$(get_audio_settings)
-            cur_v=$(echo "$audio_check" | awk '{print $1}')
-            cur_m=$(echo "$audio_check" | awk '{print $2}')
-
-            if [ "$cur_m" = "true" ]; then
-                echo "[$(date '+%H:%M:%S')] [Alert Cutoff] Silenced via MUTE while speaking rep $i" >> /tmp/battmon.log
-                kill -9 "$say_pid" 2>/dev/null
-                wait "$say_pid" 2>/dev/null
-                VOL_MODIFIED=0
-                return 0
-            fi
-            if [[ "$cur_v" =~ ^[0-9]+$ ]] && [ -n "$ACTIVE_ALERT_VOL" ] && [ "$cur_v" -le "$((ACTIVE_ALERT_VOL - 6))" ]; then
-                echo "[$(date '+%H:%M:%S')] [Alert Cutoff] Silenced via VOLUME DOWN while speaking rep $i ($cur_v% <= $((ACTIVE_ALERT_VOL - 6))%)" >> /tmp/battmon.log
-                kill -9 "$say_pid" 2>/dev/null
-                wait "$say_pid" 2>/dev/null
-                VOL_MODIFIED=0
-                return 0
-            fi
-
-            sleep "$speak_check_sec"
-        done
-
-        for ((c=0; c<pause_check_count; c++)); do
-            if [ "$type" = "LOW" ] && is_ac_power; then
-                echo "[$(date '+%H:%M:%S')] [Alert Cutoff] Charger connected during pause after rep $i" >> /tmp/battmon.log
-                return 0
-            fi
-            if [ "$type" = "HIGH" ] && ! is_ac_power; then
-                echo "[$(date '+%H:%M:%S')] [Alert Cutoff] Charger disconnected during pause after rep $i" >> /tmp/battmon.log
-                return 0
-            fi
-
-            audio_check=$(get_audio_settings)
-            cur_v=$(echo "$audio_check" | awk '{print $1}')
-            cur_m=$(echo "$audio_check" | awk '{print $2}')
-
-            if [ "$cur_m" = "true" ]; then
-                echo "[$(date '+%H:%M:%S')] [Alert Cutoff] Silenced via MUTE during pause after rep $i" >> /tmp/battmon.log
-                VOL_MODIFIED=0
-                return 0
-            fi
-            if [[ "$cur_v" =~ ^[0-9]+$ ]] && [ -n "$ACTIVE_ALERT_VOL" ] && [ "$cur_v" -le "$((ACTIVE_ALERT_VOL - 6))" ]; then
-                echo "[$(date '+%H:%M:%S')] [Alert Cutoff] Silenced via VOLUME DOWN during pause after rep $i ($cur_v% <= $((ACTIVE_ALERT_VOL - 6))%)" >> /tmp/battmon.log
-                VOL_MODIFIED=0
-                return 0
-            fi
-
-            sleep "$pause_check_sec"
-        done
-    done
-    echo "[$(date '+%H:%M:%S')] [Alert Finished] Successfully completed all $count repetitions." >> /tmp/battmon.log
+write_state() {
+    local percent="$1" level="$2" type="$3" mode="$4" source="$5" temp_file
+    temp_file=$(mktemp "$BATTMON_RUNTIME_DIR/.state.XXXXXX") || return 1
+    {
+        printf 'LAST_PERCENT=%s\n' "$percent"
+        printf 'LAST_ALERT_LEVEL=%s\n' "$level"
+        printf 'LAST_ALERT_TYPE=%s\n' "$type"
+        printf 'LAST_MODE=%s\n' "$mode"
+        printf 'LAST_SOURCE=%s\n' "$source"
+    } > "$temp_file" || {
+        rm -f "$temp_file"
+        return 1
+    }
+    chmod 600 "$temp_file" 2>/dev/null || true
+    mv -f "$temp_file" "$BATTMON_STATE_FILE"
 }
 
-for ALERT in "${ALERTS[@]}"; do
-    IFS=":" read -r p1 p2 p3 p4 p5 <<< "$ALERT"
+prepare_audio() {
+    local settings
+    settings=$(get_audio_settings) || {
+        log_event "[Warning] Audio state unavailable; speaking without changing volume"
+        AUDIO_MODIFIED=0
+        ACTIVE_ALERT_VOL=""
+        return 0
+    }
+    read -r ORIG_VOL ORIG_MUTED <<< "$settings"
+    ACTIVE_ALERT_VOL="$ORIG_VOL"
 
-    if [ -n "$p5" ]; then
-        LEVEL="$p1"
-        TYPE="$p2"
-        ALERT_REPEAT="${p3:-$REPEAT_COUNT}"
-        ALERT_DELAY="${p4:-$REPEAT_DELAY_MS}"
-        MSG="$p5"
-    elif [ -n "$p3" ]; then
-        LEVEL="$p1"
-        TYPE="$p2"
-        ALERT_REPEAT="$REPEAT_COUNT"
-        ALERT_DELAY="$REPEAT_DELAY_MS"
-        MSG="$p3"
+    if [ "$ORIG_MUTED" = "true" ]; then
+        if set_sys_muted false; then
+            AUDIO_MODIFIED=1
+        else
+            log_event "[Warning] Could not unmute output"
+        fi
+    fi
+    if [ "$ORIG_VOL" -lt "$ALERT_VOLUME" ]; then
+        if set_sys_volume "$ALERT_VOLUME"; then
+            ACTIVE_ALERT_VOL="$ALERT_VOLUME"
+            AUDIO_MODIFIED=1
+        else
+            log_event "[Warning] Could not raise output volume"
+        fi
+    fi
+}
+
+check_user_silenced_audio() {
+    [ -n "$ACTIVE_ALERT_VOL" ] || return 1
+    local settings current_volume current_muted
+    settings=$(get_audio_settings) || return 1
+    read -r current_volume current_muted <<< "$settings"
+
+    if [ "$current_muted" = "true" ]; then
+        USER_SILENCED=1
+        AUDIO_MODIFIED=0
+        INTERRUPT_REASON="Mute key"
+        return 0
+    fi
+    if [ "$current_volume" -lt "$ACTIVE_ALERT_VOL" ]; then
+        USER_SILENCED=1
+        AUDIO_MODIFIED=0
+        INTERRUPT_REASON="Volume Down (${current_volume}%)"
+        return 0
+    fi
+    return 1
+}
+
+power_should_cutoff() {
+    local type="$1" start_source="$2"
+    if [ "$type" = "LOW" ]; then
+        if [ "$start_source" = "BATTERY" ] && [ "$BATTERY_SOURCE" = "AC" ]; then
+            INTERRUPT_REASON="charger connected"
+            return 0
+        fi
+        if [ "$BATTERY_MODE" = "charging" ] || [ "$BATTERY_MODE" = "charged" ]; then
+            INTERRUPT_REASON="battery stopped discharging"
+            return 0
+        fi
     else
-        continue
+        if [ "$BATTERY_SOURCE" = "BATTERY" ] || [ "$BATTERY_MODE" = "discharging" ]; then
+            INTERRUPT_REASON="charger disconnected or battery discharging"
+            return 0
+        fi
     fi
+    return 1
+}
 
-    should_trigger=0
-    if [ "$PERCENT" -eq "$LEVEL" ]; then
-        should_trigger=1
-    elif [ "$TYPE" = "LOW" ] && [ -n "$LAST_PERCENT" ] && [ "$PERCENT" -lt "$LEVEL" ] && [ "$LAST_PERCENT" -gt "$LEVEL" ]; then
-        # Battery dropped past this threshold between checks (e.g. from 26% to 24%)
-        should_trigger=1
-    elif [ "$TYPE" = "HIGH" ] && [ -n "$LAST_PERCENT" ] && [ "$PERCENT" -gt "$LEVEL" ] && [ "$LAST_PERCENT" -lt "$LEVEL" ]; then
-        # Battery charged past this threshold between checks
-        should_trigger=1
+poll_for_interrupt() {
+    local type="$1" start_source="$2"
+    if get_battery_state && power_should_cutoff "$type" "$start_source"; then
+        return 0
     fi
+    check_user_silenced_audio
+}
 
-    if [ "$should_trigger" -eq 1 ]; then
-        if [ "$TYPE" = "HIGH" ] && ! is_ac_power; then continue; fi
-        if [ "$TYPE" = "LOW" ] && is_ac_power; then continue; fi
+speak_rule() {
+    local message="$1" type="$2" repeat_count="$3" delay_ms="$4" rule_level="$5"
+    local start_source="$BATTERY_SOURCE"
+    local poll_ms poll_seconds repetition pause_elapsed pause_step pause_seconds spoken_message
 
-        if [ "$PERCENT" = "$LAST_PERCENT" ] && [ "$LEVEL" = "$LAST_ALERTED_LEVEL" ] && [ "$TYPE" = "$LAST_ALERTED_TYPE" ]; then
-            exit 0
+    poll_ms="$CHECK_INTERVAL_MS"
+    poll_seconds=$(awk -v ms="$poll_ms" 'BEGIN { printf "%.3f", ms / 1000 }')
+
+    prepare_audio
+    log_event "[Alert Started] Rule ${rule_level}% ${type}; ${repeat_count} repeats; ${delay_ms}ms pause"
+
+    repetition=1
+    while [ "$repetition" -le "$repeat_count" ]; do
+        if get_battery_state && power_should_cutoff "$type" "$start_source"; then
+            log_event "[Alert Cutoff] $INTERRUPT_REASON before repetition $repetition"
+            return 2
+        fi
+        if check_user_silenced_audio; then
+            log_event "[Alert Cutoff] $INTERRUPT_REASON before repetition $repetition"
+            return 2
         fi
 
-        repeat_speech "$MSG" "$TYPE" "$ALERT_REPEAT" "$ALERT_DELAY" "$CHECK_INTERVAL_MS" "$LEVEL"
-        echo "$PERCENT:$LEVEL:$TYPE" > "$STATE_FILE"
+        spoken_message=$(format_speech_message "$message" "$rule_level" "${BATTERY_PERCENT:-$rule_level}")
+        log_event "[Repetition ${repetition}/${repeat_count}] Battery ${BATTERY_PERCENT:-unknown}%"
+        say "$spoken_message" &
+        SAY_PID=$!
+
+        while kill -0 "$SAY_PID" 2>/dev/null; do
+            if poll_for_interrupt "$type" "$start_source"; then
+                log_event "[Alert Cutoff] $INTERRUPT_REASON during repetition $repetition"
+                stop_speech
+                return 2
+            fi
+            sleep "$poll_seconds"
+        done
+        wait "$SAY_PID" 2>/dev/null || true
+        SAY_PID=""
+
+        pause_elapsed=0
+        while [ "$pause_elapsed" -lt "$delay_ms" ] && [ "$repetition" -lt "$repeat_count" ]; do
+            if poll_for_interrupt "$type" "$start_source"; then
+                log_event "[Alert Cutoff] $INTERRUPT_REASON after repetition $repetition"
+                return 2
+            fi
+            pause_step="$CHECK_INTERVAL_MS"
+            if [ "$pause_step" -gt "$((delay_ms - pause_elapsed))" ]; then
+                pause_step=$((delay_ms - pause_elapsed))
+            fi
+            pause_seconds=$(awk -v ms="$pause_step" 'BEGIN { printf "%.3f", ms / 1000 }')
+            sleep "$pause_seconds"
+            pause_elapsed=$((pause_elapsed + pause_step))
+        done
+        repetition=$((repetition + 1))
+    done
+
+    log_event "[Alert Finished] Rule ${rule_level}% completed"
+    return 0
+}
+
+rule_applies_to_mode() {
+    local type="$1"
+    if [ "$type" = "LOW" ]; then
+        [ "$BATTERY_MODE" = "discharging" ]
+    else
+        [ "$BATTERY_MODE" = "charging" ] || [ "$BATTERY_MODE" = "charged" ]
+    fi
+}
+
+select_trigger_rule() {
+    SELECTED_ALERT=""
+    SELECTED_LEVEL=""
+    SELECTED_TYPE=""
+    local alert level type exact=0 crossed=0 transitioned=0
+
+    for alert in "${ALERTS[@]}"; do
+        parse_alert_entry "$alert"
+        level="$PARSED_LVL"
+        type="$PARSED_TYP"
+        rule_applies_to_mode "$type" || continue
+
+        exact=0
+        crossed=0
+        transitioned=0
+        [ "$BATTERY_PERCENT" -eq "$level" ] && exact=1
+
+        if [ -n "$LAST_PERCENT" ]; then
+            if [ "$type" = "LOW" ] && [ "$BATTERY_PERCENT" -lt "$level" ] && [ "$LAST_PERCENT" -gt "$level" ]; then
+                crossed=1
+            elif [ "$type" = "HIGH" ] && [ "$BATTERY_PERCENT" -gt "$level" ] && [ "$LAST_PERCENT" -lt "$level" ]; then
+                crossed=1
+            fi
+        fi
+
+        if [ -n "$LAST_MODE" ] && [ "$LAST_MODE" != "$BATTERY_MODE" ]; then
+            if [ "$type" = "LOW" ] && [ "$BATTERY_PERCENT" -le "$level" ]; then
+                transitioned=1
+            elif [ "$type" = "HIGH" ] && [ "$BATTERY_PERCENT" -ge "$level" ]; then
+                transitioned=1
+            fi
+        fi
+
+        if [ "$exact" -eq 0 ] && [ "$crossed" -eq 0 ] && [ "$transitioned" -eq 0 ]; then
+            continue
+        fi
+        if [ "$BATTERY_PERCENT" = "$LAST_PERCENT" ] && [ "$level" = "$LAST_ALERT_LEVEL" ] && [ "$type" = "$LAST_ALERT_TYPE" ] && [ "$BATTERY_MODE" = "$LAST_MODE" ]; then
+            continue
+        fi
+
+        if [ -z "$SELECTED_ALERT" ]; then
+            SELECTED_ALERT="$alert"
+            SELECTED_LEVEL="$level"
+            SELECTED_TYPE="$type"
+            continue
+        fi
+
+        # Exact rules win. For jumps, choose the most critical crossed threshold.
+        if [ "$exact" -eq 1 ]; then
+            SELECTED_ALERT="$alert"
+            SELECTED_LEVEL="$level"
+            SELECTED_TYPE="$type"
+        elif [ "$type" = "LOW" ] && [ "$level" -lt "$SELECTED_LEVEL" ]; then
+            SELECTED_ALERT="$alert"
+            SELECTED_LEVEL="$level"
+            SELECTED_TYPE="$type"
+        elif [ "$type" = "HIGH" ] && [ "$level" -gt "$SELECTED_LEVEL" ]; then
+            SELECTED_ALERT="$alert"
+            SELECTED_LEVEL="$level"
+            SELECTED_TYPE="$type"
+        fi
+    done
+
+    [ -n "$SELECTED_ALERT" ]
+}
+
+main() {
+    local lock_result speech_result
+    acquire_monitor_lock
+    lock_result=$?
+    if [ "$lock_result" -eq 2 ]; then
+        exit 0
+    elif [ "$lock_result" -ne 0 ]; then
+        printf 'Battmon: unable to acquire monitor lock.\n' >&2
+        exit 1
+    fi
+
+    if ! load_config; then
+        log_event "[Error] Configuration could not be loaded"
+        exit 2
+    fi
+    [ -n "$CONFIG_WARNING" ] && log_event "[Config] $CONFIG_WARNING"
+    if [[ "$CONFIG_WARNING" == *"no valid alerts"* ]]; then
+        log_event "[Error] No valid configured alerts; monitor run suppressed"
+        exit 2
+    fi
+    load_state
+
+    if ! get_battery_state; then
+        log_event "[Warning] No supported battery was detected"
         exit 0
     fi
-done
 
-echo "$PERCENT::" > "$STATE_FILE"
-exit 0
+    if ! select_trigger_rule; then
+        # Preserve the alert marker while nothing changed; clearing it here would
+        # allow the same exact threshold to fire again on the following run.
+        if [ "$BATTERY_PERCENT" != "$LAST_PERCENT" ] || \
+            [ "$BATTERY_MODE" != "$LAST_MODE" ] || \
+            [ "$BATTERY_SOURCE" != "$LAST_SOURCE" ]; then
+            write_state "$BATTERY_PERCENT" "" "" "$BATTERY_MODE" "$BATTERY_SOURCE" || \
+                log_event "[Warning] Could not persist state"
+        fi
+        exit 0
+    fi
+
+    parse_alert_entry "$SELECTED_ALERT"
+    write_state "$BATTERY_PERCENT" "$PARSED_LVL" "$PARSED_TYP" "$BATTERY_MODE" "$BATTERY_SOURCE" || {
+        log_event "[Error] Could not persist trigger state; alert suppressed to avoid duplicates"
+        exit 1
+    }
+    speak_rule "$PARSED_MSG" "$PARSED_TYP" "$PARSED_REP" "$PARSED_DEL" "$PARSED_LVL"
+    speech_result=$?
+    # Charger, power-mode, mute, and volume-key cutoffs are expected outcomes.
+    [ "$speech_result" -eq 2 ] && return 0
+    return "$speech_result"
+}
+
+main "$@"

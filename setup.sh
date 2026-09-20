@@ -1,181 +1,294 @@
 #!/bin/bash
-# ==============================================================================
-# BATTMON: Universal Setup & Installation Wizard
-# Works on any macOS machine. Standard 80x24 terminal friendly.
-# ==============================================================================
+# Safe Battmon installer and uninstaller for macOS.
 
-set -e
+set -u
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REQ_FILE="$SCRIPT_DIR/requirements.txt"
-CONFIG_FILE="$SCRIPT_DIR/battery_config.sh"
-PLIST_DST="$HOME/Library/LaunchAgents/com.battery.batmon.plist"
 RUNTIME_DIR="$HOME/.battmon"
+LEGACY_DIR="$HOME/.batmon"
 BIN_DIR="$HOME/.local/bin"
+LINK_PATH="$BIN_DIR/battmon"
+PLIST_PATH="$HOME/Library/LaunchAgents/com.battery.batmon.plist"
+LOG_DIR="$HOME/Library/Logs/Battmon"
+LOG_FILE="$LOG_DIR/battmon.log"
+LABEL="com.battery.batmon"
+START_SERVICE=1
+UNINSTALL=0
+PURGE=0
+ASSUME_YES=0
 
-if [ "$1" = "--uninstall" ] || [ "$1" = "uninstall" ] || [ "$1" = "-u" ]; then
-    echo "─── BATTMON: Uninstalling ────────────────────────────────────────────────"
-    launchctl bootout "gui/$(id -u)/com.battery.batmon" 2>/dev/null || launchctl unload "$PLIST_DST" 2>/dev/null || true
-    rm -f "$PLIST_DST"
-    rm -f "$BIN_DIR/battmon" "$BIN_DIR/Battmon" "$BIN_DIR/batmon" "$BIN_DIR/Batmon" "$BIN_DIR/battery" "$BIN_DIR/battery-monitor"
-    if [ -f "$RUNTIME_DIR/battery_config.sh" ] && [ -d "$SCRIPT_DIR" ] && [ "$SCRIPT_DIR" != "$BIN_DIR" ]; then
-        cp "$RUNTIME_DIR/battery_config.sh" "$SCRIPT_DIR/battery_config.sh" 2>/dev/null || true
-    fi
-    rm -rf "$RUNTIME_DIR" "$HOME/.batmon"
-    rm -f /tmp/battmon.log /tmp/batmon.log /tmp/batmon_state /tmp/battmon_state /tmp/battmon_test_active /tmp/battmon_test_active
-    echo "  [✔] Background service unloaded & removed"
-    echo "  [✔] Global commands removed ($BIN_DIR)"
-    echo "  [✔] Custom alerts & configuration preserved in $SCRIPT_DIR/battery_config.sh"
-    echo "  [✔] Background runtime folder removed (~/.battmon/)"
-    echo "──────────────────────────────────────────────────────────────────────────"
-    echo "Battmon has been completely uninstalled."
-    echo "Your installer folder remains ready at: $SCRIPT_DIR"
-    exit 0
-fi
+usage() {
+    cat << 'EOF'
+Usage: ./setup.sh [options]
 
-clear 2>/dev/null || echo ""
-echo "─── BATTMON 🦇 macOS Battery Monitor Setup ───────────────────────────────"
-echo "Monitors battery every 60s, speaks alerts at custom %, with smart volume"
-echo "and instant cutoff via charger or keyboard MUTE (F10) / VOL DOWN (F11)."
-echo "──────────────────────────────────────────────────────────────────────────"
+  --no-start       Install files without loading the background service
+  --uninstall      Remove Battmon code and service; preserve active config
+  --purge          With --uninstall, also remove config/state after backup
+  --yes            Skip interactive uninstall confirmation
+  -h, --help       Show this help
+EOF
+}
 
-# STEP 1: Smart Dependency Check (Checks installed vs missing, installs ONLY missing)
-echo "[1/3] Checking requirements..."
-MISSING_REQS=()
-INSTALLED_REQS=()
-
-if [ -f "$REQ_FILE" ]; then
-    while IFS= read -r req || [ -n "$req" ]; do
-        req=$(echo "$req" | sed 's/#.*//' | tr -d '[:space:]')
-        [ -z "$req" ] && continue
-
-        if command -v "$req" >/dev/null 2>&1; then
-            bin_path=$(command -v "$req")
-            echo "  [✔] Installed: $req ($bin_path) -> Skipped"
-            INSTALLED_REQS+=("$req")
-        else
-            echo "  [✗] NOT installed: $req -> Installing"
-            MISSING_REQS+=("$req")
-        fi
-    done < "$REQ_FILE"
-fi
-
-if [ ${#MISSING_REQS[@]} -eq 0 ]; then
-    echo "  All requirements already installed. No installations needed."
-else
-    for missing in "${MISSING_REQS[@]}"; do
-        if command -v brew >/dev/null 2>&1; then
-            brew install "$missing" || true
-        else
-            echo "  Please install Command Line Tools: xcode-select --install"
-            exit 1
-        fi
-    done
-fi
-echo "──────────────────────────────────────────────────────────────────────────"
-
-# STEP 2: Configuration Options
-echo "[2/3] Setup options:"
-echo "  1) Quick Install: Use recommended alerts & 60% volume target"
-echo "  2) Custom Setup : Add custom percentages (e.g. 67%, 82%) now"
-while true; do
-    read -r -p "Choose either 1 or 2 (Pressing Enter will default to 1, or 'c' to cancel): " setup_choice
-    setup_choice=$(echo "$setup_choice" | tr -d '[:space:]')
-    if [ "$setup_choice" = "c" ] || [ "$setup_choice" = "C" ]; then
-        echo "Setup cancelled."
-        exit 0
-    fi
-    if [ -z "$setup_choice" ] || [ "$setup_choice" = "1" ]; then
-        setup_choice=1
-        break
-    elif [ "$setup_choice" = "2" ]; then
-        setup_choice=2
-        break
-    else
-        echo "Please enter 1 or 2 (or 'c' to cancel)."
-    fi
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --no-start) START_SERVICE=0 ;;
+        --uninstall|uninstall|-u) UNINSTALL=1 ;;
+        --purge) PURGE=1 ;;
+        --yes|-y) ASSUME_YES=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) printf 'Unknown setup option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+    esac
+    shift
 done
 
-if [ "$setup_choice" = "2" ]; then
-    "$SCRIPT_DIR/battmon"
+if [ "$PURGE" -eq 1 ] && [ "$UNINSTALL" -ne 1 ]; then
+    printf '%s\n' '--purge is only valid together with --uninstall.' >&2
+    usage >&2
+    exit 2
 fi
-echo "──────────────────────────────────────────────────────────────────────────"
 
-# STEP 3: Universal Plist & Daemon Installation
-echo "[3/3] Installing background service & terminal commands..."
-mkdir -p "$RUNTIME_DIR" "$HOME/.batmon" "$BIN_DIR" "$HOME/Library/LaunchAgents"
+managed_link_target() {
+    local path="$1" target=""
+    [ -L "$path" ] || return 1
+    target=$(readlink "$path")
+    case "$target" in
+        "$RUNTIME_DIR/battmon"|"$SCRIPT_DIR/battmon") return 0 ;;
+    esac
+    return 1
+}
 
-chmod +x "$SCRIPT_DIR/setup.sh" "$SCRIPT_DIR/battmon" "$SCRIPT_DIR/battery_monitor.sh" "$SCRIPT_DIR/battery_config.sh" 2>/dev/null || true
-
-cp "$SCRIPT_DIR/battmon" "$RUNTIME_DIR/battmon"
-chmod +x "$RUNTIME_DIR/battmon"
-
-cp "$SCRIPT_DIR/battery_monitor.sh" "$RUNTIME_DIR/battery_monitor.sh"
-chmod +x "$RUNTIME_DIR/battery_monitor.sh"
-cp "$SCRIPT_DIR/battery_monitor.sh" "$HOME/.batmon/battery_monitor.sh"
-chmod +x "$HOME/.batmon/battery_monitor.sh"
-
-# Preserve any customized alerts so re-running setup never overwrites user alerts
-if [ -f "$RUNTIME_DIR/battery_config.sh" ]; then
-    if [ "$RUNTIME_DIR/battery_config.sh" -nt "$SCRIPT_DIR/battery_config.sh" ]; then
-        cp "$RUNTIME_DIR/battery_config.sh" "$SCRIPT_DIR/battery_config.sh" 2>/dev/null || true
-    else
-        cp "$SCRIPT_DIR/battery_config.sh" "$RUNTIME_DIR/battery_config.sh" 2>/dev/null || true
+remove_managed_link() {
+    local path="$1"
+    if managed_link_target "$path"; then
+        rm -f "$path"
+        return 0
     fi
-else
-    cp "$SCRIPT_DIR/battery_config.sh" "$RUNTIME_DIR/battery_config.sh"
-fi
-chmod +x "$RUNTIME_DIR/battery_config.sh" 2>/dev/null || true
-cp "$RUNTIME_DIR/battery_config.sh" "$HOME/.batmon/battery_config.sh" 2>/dev/null || true
-chmod +x "$HOME/.batmon/battery_config.sh" 2>/dev/null || true
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        printf '  [kept] Unrelated path: %s\n' "$path"
+    fi
+}
 
-# Dynamically generate LaunchAgent for this user's machine (universal for any Mac)
-cat << EOF > "$PLIST_DST"
+stop_service() {
+    local uid_value
+    uid_value=$(id -u)
+    launchctl bootout "gui/${uid_value}/${LABEL}" >/dev/null 2>&1 || true
+}
+
+confirm_uninstall() {
+    [ "$ASSUME_YES" -eq 1 ] && return 0
+    if [ ! -t 0 ]; then
+        printf 'Refusing non-interactive uninstall without --yes.\n' >&2
+        return 1
+    fi
+    local answer
+    read -r -p "Uninstall Battmon? Active configuration will be preserved. (y/N): " answer || return 1
+    case "$answer" in y|Y|yes|YES) return 0 ;; esac
+    return 1
+}
+
+uninstall_battmon() {
+    confirm_uninstall || {
+        echo "Uninstall cancelled."
+        return 1
+    }
+    stop_service
+    rm -f "$PLIST_PATH"
+    remove_managed_link "$LINK_PATH"
+
+    local alias_name
+    for alias_name in Battmon batmon Batmon battery battery-monitor; do
+        remove_managed_link "$BIN_DIR/$alias_name"
+    done
+
+    rm -f "$RUNTIME_DIR/battmon" "$RUNTIME_DIR/battery_monitor.sh" "$RUNTIME_DIR/battmon_common.sh"
+    rm -f "$RUNTIME_DIR/monitor.lock/pid" "$RUNTIME_DIR/config.lock/pid" 2>/dev/null || true
+    rmdir "$RUNTIME_DIR/monitor.lock" "$RUNTIME_DIR/config.lock" 2>/dev/null || true
+
+    if [ "$PURGE" -eq 1 ]; then
+        local backup_path="$HOME/battmon-config-backup-$(date '+%Y%m%d-%H%M%S').sh"
+        if [ -f "$RUNTIME_DIR/battery_config.sh" ]; then
+            cp "$RUNTIME_DIR/battery_config.sh" "$backup_path" || return 1
+            chmod 600 "$backup_path" 2>/dev/null || true
+            printf '  [saved] Configuration backup: %s\n' "$backup_path"
+        fi
+        rm -f "$RUNTIME_DIR/battery_config.sh" "$RUNTIME_DIR/state"
+        rm -f "$RUNTIME_DIR"/backups/* 2>/dev/null || true
+        rmdir "$RUNTIME_DIR/backups" "$RUNTIME_DIR" 2>/dev/null || true
+        rm -f "$LOG_FILE" "$LOG_FILE.1"
+        rmdir "$LOG_DIR" 2>/dev/null || true
+    else
+        echo "  [kept] Active configuration: $RUNTIME_DIR/battery_config.sh"
+    fi
+
+    echo "Battmon uninstalled safely."
+}
+
+preflight() {
+    if [ "$(uname -s)" != "Darwin" ]; then
+        echo "Battmon requires macOS." >&2
+        return 1
+    fi
+    local command_name missing=0
+    for command_name in pmset say launchctl osascript awk sed sort mktemp plutil; do
+        if ! command -v "$command_name" >/dev/null 2>&1; then
+            printf 'Missing required macOS command: %s\n' "$command_name" >&2
+            missing=1
+        fi
+    done
+    [ "$missing" -eq 0 ] || return 1
+
+    for command_name in battmon battery_monitor.sh battmon_common.sh battery_config.sh; do
+        [ -f "$SCRIPT_DIR/$command_name" ] || {
+            printf 'Missing installer file: %s\n' "$SCRIPT_DIR/$command_name" >&2
+            return 1
+        }
+    done
+    /bin/bash -n "$SCRIPT_DIR/battmon" "$SCRIPT_DIR/battery_monitor.sh" \
+        "$SCRIPT_DIR/battmon_common.sh" "$SCRIPT_DIR/battery_config.sh" || return 1
+
+    if [ -e "$LINK_PATH" ] || [ -L "$LINK_PATH" ]; then
+        if ! managed_link_target "$LINK_PATH"; then
+            printf 'Refusing to overwrite unrelated command: %s\n' "$LINK_PATH" >&2
+            return 1
+        fi
+    fi
+}
+
+copy_atomic() {
+    local source_path="$1" destination_path="$2" mode="$3" destination_dir temp_path
+    destination_dir=$(dirname "$destination_path")
+    mkdir -p "$destination_dir" || return 1
+    temp_path=$(mktemp "$destination_dir/.battmon-install.XXXXXX") || return 1
+    if ! cp "$source_path" "$temp_path"; then
+        rm -f "$temp_path"
+        return 1
+    fi
+    chmod "$mode" "$temp_path" || {
+        rm -f "$temp_path"
+        return 1
+    }
+    mv -f "$temp_path" "$destination_path"
+}
+
+prepare_command_link() {
+    mkdir -p "$BIN_DIR" || return 1
+    if [ -e "$LINK_PATH" ] || [ -L "$LINK_PATH" ]; then
+        if ! managed_link_target "$LINK_PATH"; then
+            printf 'Refusing to overwrite unrelated command: %s\n' "$LINK_PATH" >&2
+            return 1
+        fi
+        rm -f "$LINK_PATH"
+    fi
+
+    local alias_name
+    for alias_name in Battmon batmon Batmon battery battery-monitor; do
+        remove_managed_link "$BIN_DIR/$alias_name"
+    done
+    ln -s "$RUNTIME_DIR/battmon" "$LINK_PATH"
+}
+
+preserve_or_seed_config() {
+    mkdir -p "$RUNTIME_DIR/backups" || return 1
+    chmod 700 "$RUNTIME_DIR" "$RUNTIME_DIR/backups" 2>/dev/null || true
+    if [ -f "$RUNTIME_DIR/battery_config.sh" ]; then
+        local backup_path
+        # BSD mktemp requires the X template at the end of the pathname.
+        backup_path=$(mktemp "$RUNTIME_DIR/backups/battery_config.sh.XXXXXX") || return 1
+        cp "$RUNTIME_DIR/battery_config.sh" "$backup_path" || return 1
+        chmod 600 "$backup_path" 2>/dev/null || true
+        return 0
+    fi
+    if [ -f "$LEGACY_DIR/battery_config.sh" ]; then
+        copy_atomic "$LEGACY_DIR/battery_config.sh" "$RUNTIME_DIR/battery_config.sh" 600
+    else
+        copy_atomic "$SCRIPT_DIR/battery_config.sh" "$RUNTIME_DIR/battery_config.sh" 600
+    fi
+}
+
+write_plist() {
+    local plist_dir temp_plist
+    plist_dir=$(dirname "$PLIST_PATH")
+    mkdir -p "$plist_dir" "$LOG_DIR" || return 1
+    chmod 700 "$LOG_DIR" 2>/dev/null || true
+    temp_plist=$(mktemp "$plist_dir/.com.battery.batmon.XXXXXX") || return 1
+    cat << EOF > "$temp_plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.battery.batmon</string>
+    <string>$LABEL</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>$HOME/.battmon/battery_monitor.sh</string>
+        <string>$RUNTIME_DIR/battery_monitor.sh</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>StartInterval</key>
     <integer>60</integer>
     <key>StandardOutPath</key>
-    <string>/tmp/battmon.log</string>
+    <string>$LOG_FILE</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/battmon.log</string>
+    <string>$LOG_FILE</string>
     <key>ProcessType</key>
     <string>Background</string>
 </dict>
 </plist>
 EOF
-
-launchctl unload "$PLIST_DST" 2>/dev/null || true
-launchctl load "$PLIST_DST" 2>/dev/null || true
-
-for name in battmon Battmon batmon Batmon battery battery-monitor; do
-    ln -sf "$RUNTIME_DIR/battmon" "$BIN_DIR/$name"
-done
-
-for shrc in "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.bashrc" "$HOME/.zprofile"; do
-    if [ -f "$shrc" ]; then
-        if ! grep -q '\.local/bin' "$shrc"; then
-            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$shrc"
-        fi
+    if ! plutil -lint "$temp_plist" >/dev/null; then
+        rm -f "$temp_plist"
+        return 1
     fi
-done
+    chmod 600 "$temp_plist" || return 1
+    mv -f "$temp_plist" "$PLIST_PATH"
+}
 
-echo "  [✔] Daemon installed (~/.battmon/)"
-echo "  [✔] Auto-start enabled on boot: $PLIST_DST"
-echo "  [✔] Global commands: 'battmon', 'Battmon', 'batmon'"
-echo "──────────────────────────────────────────────────────────────────────────"
-echo "🎉 Installation Complete! Battmon runs in the background every 60s."
-echo "Type 'battmon' in any terminal to open the manager."
-echo "Type 'battmon --help' to view all commands."
-echo "──────────────────────────────────────────────────────────────────────────"
+install_battmon() {
+    preflight || return 1
+    stop_service
+
+    mkdir -p "$RUNTIME_DIR" "$LOG_DIR" || return 1
+    chmod 700 "$RUNTIME_DIR" "$LOG_DIR" 2>/dev/null || true
+    preserve_or_seed_config || return 1
+    if [ ! -f "$RUNTIME_DIR/state" ] && [ -f "$HOME/.battmon_state" ]; then
+        copy_atomic "$HOME/.battmon_state" "$RUNTIME_DIR/state" 600 || return 1
+    fi
+
+    copy_atomic "$SCRIPT_DIR/battmon" "$RUNTIME_DIR/battmon" 755 || return 1
+    copy_atomic "$SCRIPT_DIR/battery_monitor.sh" "$RUNTIME_DIR/battery_monitor.sh" 755 || return 1
+    copy_atomic "$SCRIPT_DIR/battmon_common.sh" "$RUNTIME_DIR/battmon_common.sh" 644 || return 1
+    prepare_command_link || return 1
+
+    # Validate, normalize, and safely serialize the active configuration.
+    "$RUNTIME_DIR/battmon" migrate >/dev/null || return 1
+
+    if [ "$START_SERVICE" -eq 1 ]; then
+        write_plist || return 1
+        local uid_value
+        uid_value=$(id -u)
+        if ! launchctl bootstrap "gui/${uid_value}" "$PLIST_PATH"; then
+            echo "Battmon installed, but the LaunchAgent failed to load." >&2
+            return 1
+        fi
+        if ! launchctl print "gui/${uid_value}/${LABEL}" >/dev/null 2>&1; then
+            echo "Battmon installed, but the LaunchAgent could not be verified." >&2
+            return 1
+        fi
+        echo "Battmon installed and background monitoring started."
+    else
+        rm -f "$PLIST_PATH"
+        echo "Battmon installed; background monitoring remains stopped."
+        echo "Run 'battmon start' when you want to enable it."
+    fi
+    echo "Command: $LINK_PATH"
+    echo "Config : $RUNTIME_DIR/battery_config.sh"
+    echo "Logs   : $LOG_FILE"
+}
+
+if [ "$UNINSTALL" -eq 1 ]; then
+    uninstall_battmon
+else
+    install_battmon
+fi

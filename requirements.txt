@@ -6,3 +6,7 @@ launchctl
 osascript
 bash
 awk
+sed
+sort
+mktemp
+plutil

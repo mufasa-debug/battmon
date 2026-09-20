@@ -13,15 +13,20 @@ while [ -h "$SOURCE" ]; do
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
-RUNTIME_DIR="$HOME/.battmon"
-RUNTIME_CONFIG="$RUNTIME_DIR/battery_config.sh"
-PACKAGE_CONFIG="$SCRIPT_DIR/battery_config.sh"
-CONFIG_FILE="$RUNTIME_CONFIG"
-PLIST_DST="$HOME/Library/LaunchAgents/com.battery.batmon.plist"
-LOG_FILE="/tmp/battmon.log"
-STATE_FILE="$HOME/.battmon_state"
+COMMON_FILE="$SCRIPT_DIR/battmon_common.sh"
+if [ ! -f "$COMMON_FILE" ]; then
+    printf 'Battmon: missing %s\n' "$COMMON_FILE" >&2
+    exit 2
+fi
+source "$COMMON_FILE" || exit 2
 
-mkdir -p "$RUNTIME_DIR" 2>/dev/null || true
+RUNTIME_DIR="$BATTMON_RUNTIME_DIR"
+RUNTIME_CONFIG="$BATTMON_CONFIG_FILE"
+PACKAGE_CONFIG="$BATTMON_TEMPLATE_CONFIG"
+CONFIG_FILE="$BATTMON_CONFIG_FILE"
+PLIST_DST="$BATTMON_PLIST"
+LOG_FILE="$BATTMON_LOG_FILE"
+STATE_FILE="$BATTMON_STATE_FILE"
 
 show_help() {
     cat << EOF
@@ -37,6 +42,8 @@ Commands:
   battmon start/stop   Start or stop background monitor
   battmon restart      Restart background service and refresh config
   battmon edit         Open battery_config.sh in text editor
+  battmon doctor       Run read-only installation and runtime checks
+  battmon migrate      Validate and safely rewrite the active config
 
 Silencing Shortcuts:
   • Plug in or unplug your charger to stop an active alert immediately.
@@ -45,149 +52,54 @@ Silencing Shortcuts:
 
 Files:
   Config : ~/.battmon/battery_config.sh
-  Logs   : /tmp/battmon.log
+  Logs   : ~/Library/Logs/Battmon/battmon.log
 ──────────────────────────────────────────────────────────────────────────
 EOF
 }
 
-load_config() {
-    local target_cfg=""
-    if [ -f "$RUNTIME_CONFIG" ] && [ -f "$PACKAGE_CONFIG" ]; then
-        if [ "$RUNTIME_CONFIG" -nt "$PACKAGE_CONFIG" ]; then
-            target_cfg="$RUNTIME_CONFIG"
-            cp "$RUNTIME_CONFIG" "$PACKAGE_CONFIG" 2>/dev/null || true
-        else
-            target_cfg="$PACKAGE_CONFIG"
-            cp "$PACKAGE_CONFIG" "$RUNTIME_CONFIG" 2>/dev/null || true
-        fi
-    elif [ -f "$RUNTIME_CONFIG" ]; then
-        target_cfg="$RUNTIME_CONFIG"
-        if [ -d "$SCRIPT_DIR" ] && [ "$SCRIPT_DIR" != "$HOME/.local/bin" ]; then
-            cp "$RUNTIME_CONFIG" "$PACKAGE_CONFIG" 2>/dev/null || true
-        fi
-    elif [ -f "$PACKAGE_CONFIG" ]; then
-        target_cfg="$PACKAGE_CONFIG"
-        cp "$PACKAGE_CONFIG" "$RUNTIME_CONFIG" 2>/dev/null || true
-    fi
-
-    if [ -n "$target_cfg" ]; then
-        source "$target_cfg" 2>/dev/null || true
-    fi
-
-    REPEAT_COUNT="${REPEAT_COUNT:-10}"
-    REPEAT_DELAY_MS="${REPEAT_DELAY_MS:-100}"
-    CHECK_INTERVAL_MS="${CHECK_INTERVAL_MS:-200}"
-    ALERT_VOLUME="${ALERT_VOLUME:-60}"
-    RESTORE_VOLUME=true
-}
-
-load_config
-
-sort_alerts() {
-    local sorted=()
-    while IFS= read -r line; do
-        [ -n "$line" ] && sorted+=("$line")
-    done < <(printf '%s\n' "${ALERTS[@]}" | sort -t: -k1,1nr)
-    ALERTS=("${sorted[@]}")
-}
+if ! load_config; then
+    printf 'Battmon: using safe built-in defaults because configuration loading failed.\n' >&2
+    set_builtin_defaults
+fi
 
 sync_runtime_files() {
-    mkdir -p "$RUNTIME_DIR" "$HOME/.batmon" 2>/dev/null || true
-    if [ -f "$SCRIPT_DIR/battery_monitor.sh" ]; then
-        cp "$SCRIPT_DIR/battery_monitor.sh" "$RUNTIME_DIR/battery_monitor.sh" 2>/dev/null || true
-        chmod +x "$RUNTIME_DIR/battery_monitor.sh" 2>/dev/null || true
-        cp "$SCRIPT_DIR/battery_monitor.sh" "$HOME/.batmon/battery_monitor.sh" 2>/dev/null || true
-        chmod +x "$HOME/.batmon/battery_monitor.sh" 2>/dev/null || true
-    fi
-}
+    ensure_runtime_dirs || return 1
+    [ "$SCRIPT_DIR" = "$RUNTIME_DIR" ] && return 0
 
-save_config() {
-    sort_alerts
-    mkdir -p "$RUNTIME_DIR" "$HOME/.batmon" 2>/dev/null || true
-
-    local config_file_temp
-    config_file_temp=$(mktemp /tmp/battmon_cfg.XXXXXX 2>/dev/null || echo "/tmp/battmon_cfg_tmp.sh")
-
-    {
-        echo "#!/bin/bash"
-        echo "# =============================================================================="
-        echo "# Battmon Configuration File"
-        echo "# ------------------------------------------------------------------------------"
-        echo "# Edit directly or use the interactive Battmon GUI (\`battmon\`)."
-        echo "# =============================================================================="
-        echo ""
-        echo "REPEAT_COUNT=$REPEAT_COUNT"
-        echo "REPEAT_DELAY_MS=$REPEAT_DELAY_MS"
-        echo "CHECK_INTERVAL_MS=$CHECK_INTERVAL_MS"
-        echo ""
-        echo "ALERT_VOLUME=$ALERT_VOLUME"
-        echo "RESTORE_VOLUME=true"
-        echo ""
-        echo "ALERTS=("
-        for alert in "${ALERTS[@]}"; do
-            echo "    \"$alert\""
-        done
-        echo ")"
-        echo ""
-    } > "$config_file_temp"
-
-    # 1. Save to runtime directory (~/.battmon/battery_config.sh)
-    cp "$config_file_temp" "$RUNTIME_CONFIG" 2>/dev/null || true
-    chmod +x "$RUNTIME_CONFIG" 2>/dev/null || true
-
-    # 2. Save to package folder (e.g. ~/Desktop/Battmon/battery_config.sh)
-    if [ -d "$SCRIPT_DIR" ] && [ "$SCRIPT_DIR" != "$HOME/.local/bin" ]; then
-        cp "$config_file_temp" "$PACKAGE_CONFIG" 2>/dev/null || true
-        chmod +x "$PACKAGE_CONFIG" 2>/dev/null || true
-    fi
-    if [ -f "$HOME/Desktop/Battmon/battery_config.sh" ]; then
-        cp "$config_file_temp" "$HOME/Desktop/Battmon/battery_config.sh" 2>/dev/null || true
-        chmod +x "$HOME/Desktop/Battmon/battery_config.sh" 2>/dev/null || true
-    fi
-
-    # 3. Save to legacy directory if present
-    if [ -d "$HOME/.batmon" ]; then
-        cp "$config_file_temp" "$HOME/.batmon/battery_config.sh" 2>/dev/null || true
-        chmod +x "$HOME/.batmon/battery_config.sh" 2>/dev/null || true
-    fi
-
-    rm -f "$config_file_temp"
-    sync_runtime_files
-    echo "Settings saved successfully."
-}
-
-get_battery_percent() {
-    pmset -g batt | grep -Eo "[0-9]+%" | head -n 1 | tr -d '%'
-}
-
-is_ac_power() {
-    pmset -g batt | grep -q 'AC Power'
-}
-
-get_audio_settings() {
-    osascript -e "get {output volume, output muted} of (get volume settings)" 2>/dev/null | tr -d ','
-}
-
-set_sys_volume() {
-    local v="$1"
-    osascript -e "set volume output volume $v" 2>/dev/null || true
-}
-
-set_sys_muted() {
-    local m="$1"
-    osascript -e "set volume output muted $m" 2>/dev/null || true
+    local file source_path temp_path mode
+    for file in battmon battery_monitor.sh battmon_common.sh; do
+        source_path="$SCRIPT_DIR/$file"
+        [ -f "$source_path" ] || {
+            printf 'Battmon: missing installation file %s\n' "$source_path" >&2
+            return 1
+        }
+        temp_path=$(mktemp "$RUNTIME_DIR/.${file}.XXXXXX") || return 1
+        if ! cp "$source_path" "$temp_path"; then
+            rm -f "$temp_path"
+            return 1
+        fi
+        mode=755
+        [ "$file" = "battmon_common.sh" ] && mode=644
+        chmod "$mode" "$temp_path" || {
+            rm -f "$temp_path"
+            return 1
+        }
+        mv -f "$temp_path" "$RUNTIME_DIR/$file" || return 1
+    done
 }
 
 is_service_running() {
-    launchctl list 2>/dev/null | grep -q "com.battery.batmon"
+    local uid_value
+    uid_value=$(id -u)
+    launchctl print "gui/${uid_value}/${BATTMON_LABEL}" >/dev/null 2>&1
 }
 
-service_install() {
-    sync_runtime_files
-    mkdir -p "$HOME/Library/LaunchAgents"
-
-    # Dynamically generate plist for this user machine
-    cat << EOF > "$PLIST_DST"
+write_launch_agent() {
+    local plist_dir temp_plist
+    plist_dir=$(dirname "$PLIST_DST")
+    mkdir -p "$plist_dir" "$BATTMON_LOG_DIR" || return 1
+    temp_plist=$(mktemp "$plist_dir/.com.battery.batmon.XXXXXX") || return 1
+    cat << EOF > "$temp_plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -204,23 +116,59 @@ service_install() {
     <key>StartInterval</key>
     <integer>60</integer>
     <key>StandardOutPath</key>
-    <string>/tmp/battmon.log</string>
+    <string>$BATTMON_LOG_FILE</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/battmon.log</string>
+    <string>$BATTMON_LOG_FILE</string>
     <key>ProcessType</key>
     <string>Background</string>
 </dict>
 </plist>
 EOF
+    if ! plutil -lint "$temp_plist" >/dev/null; then
+        rm -f "$temp_plist"
+        printf 'Battmon: generated LaunchAgent is invalid.\n' >&2
+        return 1
+    fi
+    chmod 600 "$temp_plist" || {
+        rm -f "$temp_plist"
+        return 1
+    }
+    mv -f "$temp_plist" "$PLIST_DST"
+}
 
-    launchctl unload "$PLIST_DST" 2>/dev/null || true
-    launchctl load "$PLIST_DST" 2>/dev/null || true
-    install_symlinks
-    echo "Background monitor active and will auto-start every time this Mac turns on."
+service_install() {
+    local uid_value
+    uid_value=$(id -u)
+    ensure_active_config || return 1
+    load_config || return 1
+    save_config >/dev/null || return 1
+    sync_runtime_files || return 1
+    install_symlinks || return 1
+    write_launch_agent || return 1
+
+    launchctl bootout "gui/${uid_value}/${BATTMON_LABEL}" >/dev/null 2>&1 || true
+    if ! launchctl bootstrap "gui/${uid_value}" "$PLIST_DST"; then
+        printf 'Battmon: LaunchAgent failed to load.\n' >&2
+        return 1
+    fi
+    if ! is_service_running; then
+        printf 'Battmon: LaunchAgent loaded but could not be verified.\n' >&2
+        return 1
+    fi
+    echo "Background monitor is active and will run after login."
 }
 
 service_stop() {
-    launchctl unload "$PLIST_DST" 2>/dev/null || true
+    local uid_value
+    uid_value=$(id -u)
+    if ! is_service_running; then
+        echo "Background monitor is already stopped."
+        return 0
+    fi
+    if ! launchctl bootout "gui/${uid_value}/${BATTMON_LABEL}"; then
+        printf 'Battmon: background monitor could not be stopped.\n' >&2
+        return 1
+    fi
     echo "Background monitor stopped."
 }
 
@@ -229,35 +177,29 @@ service_start() {
 }
 
 service_restart() {
-    service_stop
-    sleep 0.5
+    service_stop || return 1
     service_start
 }
 
 install_symlinks() {
-    local bindir="$HOME/.local/bin"
-    mkdir -p "$bindir"
-    for name in battmon Battmon batmon Batmon battery battery-monitor; do
-        ln -sf "$SCRIPT_DIR/battmon" "$bindir/$name"
-    done
-}
-
-parse_alert_entry() {
-    local alert="$1"
-    IFS=":" read -r p1 p2 p3 p4 p5 <<< "$alert"
-    if [ -n "$p5" ]; then
-        PARSED_LVL="$p1"
-        PARSED_TYP="$p2"
-        PARSED_REP="${p3:-$REPEAT_COUNT}"
-        PARSED_DEL="${p4:-$REPEAT_DELAY_MS}"
-        PARSED_MSG="$p5"
-    else
-        PARSED_LVL="$p1"
-        PARSED_TYP="$p2"
-        PARSED_REP="$REPEAT_COUNT"
-        PARSED_DEL="$REPEAT_DELAY_MS"
-        PARSED_MSG="$p3"
+    local bindir="$HOME/.local/bin" link_path="$HOME/.local/bin/battmon" target=""
+    mkdir -p "$bindir" || return 1
+    if [ -e "$link_path" ] || [ -L "$link_path" ]; then
+        if [ -L "$link_path" ]; then
+            target=$(readlink "$link_path")
+            case "$target" in
+                "$RUNTIME_DIR/battmon"|"$SCRIPT_DIR/battmon") ;;
+                *)
+                    printf 'Battmon: refusing to replace existing command %s -> %s\n' "$link_path" "$target" >&2
+                    return 1
+                    ;;
+            esac
+        else
+            printf 'Battmon: refusing to replace existing file %s\n' "$link_path" >&2
+            return 1
+        fi
     fi
+    ln -sfn "$RUNTIME_DIR/battmon" "$link_path"
 }
 
 prompt_number() {
@@ -268,7 +210,11 @@ prompt_number() {
     local result_var="$5"
 
     while true; do
-        read -r -p "$prompt_msg" input_val
+        if ! read -r -p "$prompt_msg" input_val; then
+            echo ""
+            echo "Input closed; returning."
+            return 1
+        fi
         input_val=$(echo "$input_val" | tr -d '[:space:]')
 
         if [ "$input_val" = "c" ] || [ "$input_val" = "C" ]; then
@@ -299,21 +245,31 @@ prompt_number() {
 }
 
 show_status() {
-    load_config
-    local pct
-    pct=$(get_battery_percent)
-    local pwr="On Battery"
-    if is_ac_power; then pwr="Currently Charging"; fi
-    local audio_info
-    audio_info=$(get_audio_settings)
-    local cur_vol
-    cur_vol=$(echo "$audio_info" | awk '{print $1}')
+    load_config || return 1
+    local pct="N/A" pwr="Power state unavailable"
+    local audio_info="" cur_vol="Unavailable" cur_muted=""
+    if get_battery_state; then
+        pct="$BATTERY_PERCENT"
+        pwr=$(battery_status_label)
+    fi
+    if audio_info=$(get_audio_settings); then
+        read -r cur_vol cur_muted <<< "$audio_info"
+        [ "$cur_muted" = "true" ] && cur_vol="${cur_vol}% (muted)" || cur_vol="${cur_vol}%"
+    fi
 
     echo "─── BATTMON STATUS ───────────────────────────────────────────────────────"
-    printf " Battery               : %-4s (%s)\n" "${pct}%" "$pwr"
-    printf " Current system volume : %s%%\n" "$cur_vol"
+    if [ "$pct" = "N/A" ]; then
+        printf " Battery               : Not detected (%s)\n" "$pwr"
+    else
+        printf " Battery               : %-4s (%s)\n" "${pct}%" "$pwr"
+    fi
+    printf " Current system volume : %s\n" "$cur_vol"
     printf " Volume target         : %s%%\n" "$ALERT_VOLUME"
+    printf " Background service    : %s\n" "$(is_service_running && echo Running || echo Stopped)"
     echo "──────────────────────────────────────────────────────────────────────────"
+    if [ -n "$CONFIG_WARNING" ]; then
+        printf " Config note: %s\n" "$CONFIG_WARNING"
+    fi
     echo " Configured Alert Rules:"
     printf "   %-3s %-5s %-6s %-7s %-9s %s\n" "#" "LVL" "TYPE" "REPEATS" "PAUSE" "SPOKEN MESSAGE"
     local idx=1
@@ -350,7 +306,10 @@ edit_alert_at_index() {
     local new_typ="HIGH"
     if [ "$trig_sel" = "2" ]; then new_typ="LOW"; fi
 
-    read -r -p "2. Spoken message (Press Enter for \"${PARSED_MSG}\", or 'c' to cancel): " new_msg
+    if ! read -r -p "2. Spoken message (Press Enter for \"${PARSED_MSG}\", or 'c' to cancel): " new_msg; then
+        echo "Input closed; no changes saved."
+        return
+    fi
     if [ "$new_msg" = "c" ] || [ "$new_msg" = "C" ]; then echo "Cancelled."; return; fi
     new_msg="${new_msg:-$PARSED_MSG}"
 
@@ -365,7 +324,7 @@ edit_alert_at_index() {
     fi
 
     ALERTS[$target_idx]="${lvl}:${new_typ}:${new_rep}:${new_del}:${new_msg}"
-    save_config
+    save_config || return
     echo "Alert #$alert_num (${lvl}%) updated successfully."
 }
 
@@ -469,7 +428,10 @@ add_alert() {
     local new_typ="HIGH"
     if [ "$trig_choice" = "2" ]; then new_typ="LOW"; fi
 
-    read -r -p "3. Spoken message (Press Enter for 'Battery is at $new_lvl percent', or 'c' to cancel): " new_msg
+    if ! read -r -p "3. Spoken message (Press Enter for 'Battery is at $new_lvl percent', or 'c' to cancel): " new_msg; then
+        echo "Input closed; no changes saved."
+        return
+    fi
     if [ "$new_msg" = "c" ] || [ "$new_msg" = "C" ]; then echo "Cancelled."; return; fi
     if [ -z "$new_msg" ]; then new_msg="Battery is at $new_lvl percent"; fi
 
@@ -485,11 +447,11 @@ add_alert() {
 
     if [ -n "$replace_idx" ]; then
         ALERTS[$replace_idx]="${new_lvl}:${new_typ}:${new_rep}:${new_del}:${new_msg}"
-        save_config
+        save_config || return
         echo "Alert for ${new_lvl}% overwritten successfully."
     else
         ALERTS+=("${new_lvl}:${new_typ}:${new_rep}:${new_del}:${new_msg}")
-        save_config
+        save_config || return
         echo "Added alert: ${new_lvl}% (${new_typ}) -> \"${new_msg}\""
     fi
 }
@@ -514,9 +476,19 @@ delete_alert() {
 
     local target_idx=$((alert_num - 1))
     local deleted="${ALERTS[$target_idx]}"
+    parse_alert_entry "$deleted"
+    local delete_confirm
+    if ! read -r -p "Delete ${PARSED_LVL}% ${PARSED_TYP} alert \"${PARSED_MSG}\"? (y/N): " delete_confirm; then
+        echo "Input closed; alert kept."
+        return
+    fi
+    case "$delete_confirm" in
+        y|Y|yes|YES) ;;
+        *) echo "Cancelled; alert kept."; return ;;
+    esac
     unset 'ALERTS[target_idx]'
     ALERTS=("${ALERTS[@]}")
-    save_config
+    save_config || return
     echo "Deleted: $deleted"
 }
 
@@ -539,11 +511,14 @@ edit_timing() {
     fi
     REPEAT_DELAY_MS="$new_del"
 
-    save_config
+    save_config || return
     echo "Default timing updated to ${REPEAT_COUNT}x repeat and ${REPEAT_DELAY_MS} ms pause."
 
     echo ""
-    read -r -p "Apply these settings to existing rules? (y/n) (or 'c' to return): " apply_confirm
+    if ! read -r -p "Apply these settings to existing rules? (y/n) (or 'c' to return): " apply_confirm; then
+        echo "Input closed; defaults saved without changing existing rules."
+        return
+    fi
     if [ "$apply_confirm" = "y" ] || [ "$apply_confirm" = "Y" ] || [ "$apply_confirm" = "yes" ]; then
         local updated_alerts=()
         for alert in "${ALERTS[@]}"; do
@@ -551,7 +526,7 @@ edit_timing() {
             updated_alerts+=("${PARSED_LVL}:${PARSED_TYP}:${new_cnt}:${new_del}:${PARSED_MSG}")
         done
         ALERTS=("${updated_alerts[@]}")
-        save_config
+        save_config || return
         echo "  [✔] Applied ${new_cnt}x repeat and ${new_del} ms pause to all ${#ALERTS[@]} existing alert rules!"
         read -r -p "Press [Enter] to return (or 'c')..."
     fi
@@ -576,7 +551,10 @@ apply_timing_to_existing_rules() {
     fi
 
     echo ""
-    read -r -p "Apply ${new_cnt}x repeat and ${new_del} ms pause to all ${#ALERTS[@]} rules? (y/n) (or 'c' to cancel): " confirm
+    if ! read -r -p "Apply ${new_cnt}x repeat and ${new_del} ms pause to all ${#ALERTS[@]} rules? (y/n) (or 'c' to cancel): " confirm; then
+        echo "Input closed; no changes saved."
+        return
+    fi
     if [ "$confirm" = "c" ] || [ "$confirm" = "C" ]; then
         echo "Cancelled."
         return
@@ -591,7 +569,7 @@ apply_timing_to_existing_rules() {
             updated_alerts+=("${PARSED_LVL}:${PARSED_TYP}:${new_cnt}:${new_del}:${PARSED_MSG}")
         done
         ALERTS=("${updated_alerts[@]}")
-        save_config
+        save_config || return
         echo "  [✔] Applied ${new_cnt}x repeat and ${new_del} ms pause to all ${#ALERTS[@]} alert rules!"
         read -r -p "Press [Enter] to return (or 'c')..."
     else
@@ -602,13 +580,15 @@ apply_timing_to_existing_rules() {
 edit_volume_settings() {
     load_config
     local audio_info
-    audio_info=$(get_audio_settings)
-    local cur_vol
-    cur_vol=$(echo "$audio_info" | awk '{print $1}')
+    local cur_vol="Unavailable" cur_muted=""
+    if audio_info=$(get_audio_settings); then
+        read -r cur_vol cur_muted <<< "$audio_info"
+        [ "$cur_muted" = "true" ] && cur_vol="${cur_vol}% (muted)" || cur_vol="${cur_vol}%"
+    fi
 
     echo ""
     echo "─── Volume Target Settings ───────────────────────────────────────────────"
-    echo "Current system volume: ${cur_vol}%"
+    echo "Current system volume: ${cur_vol}"
     echo "Volume target: ${ALERT_VOLUME}%"
     echo ""
     echo "Note: If your Mac is on mute or lower than the volume target, Battmon"
@@ -623,7 +603,7 @@ edit_volume_settings() {
     ALERT_VOLUME="$new_v"
     RESTORE_VOLUME=true
 
-    save_config
+    save_config || return
     echo "Volume target updated to ${ALERT_VOLUME}%."
 }
 
@@ -632,25 +612,17 @@ reset_defaults() {
     echo "─── Reset Everything to Default ──────────────────────────────────────────"
     echo "This will reset all alert rules, repeat count, delays, and volume target"
     echo "back to the factory recommended defaults."
-    read -r -p "Are you sure you want to reset everything? (y/n) [or 'c' to cancel]: " confirm
+    if ! read -r -p "Are you sure you want to reset everything? (y/n) [or 'c' to cancel]: " confirm; then
+        echo "Input closed; settings kept."
+        return
+    fi
     if [ "$confirm" = "c" ] || [ "$confirm" = "C" ]; then
         echo "Cancelled."
         return
     fi
     if [[ "$confirm" =~ ^[Yy] ]]; then
-        REPEAT_COUNT=10
-        REPEAT_DELAY_MS=100
-        CHECK_INTERVAL_MS=200
-        ALERT_VOLUME=60
-        RESTORE_VOLUME=true
-        ALERTS=(
-            "100:HIGH:10:100:Battery is fully charged"
-            "80:HIGH:10:100:The battery is optimally charged"
-            "10:LOW:15:100:Charge up your battery"
-            "5:LOW:20:1000:Battery is critically low"
-            "1:LOW:20:800:Battery is critically low"
-        )
-        save_config
+        set_builtin_defaults
+        save_config || return
         echo "All settings have been reset to default!"
         read -r -p "Press [Enter] to return (or 'c')..."
     else
@@ -658,221 +630,142 @@ reset_defaults() {
     fi
 }
 
+TEST_SAY_PID=""
+TEST_ORIG_VOL=""
+TEST_ORIG_MUTED=""
+TEST_AUDIO_MODIFIED=0
+
+cleanup_voice_test() {
+    if [ -n "$TEST_SAY_PID" ] && kill -0 "$TEST_SAY_PID" 2>/dev/null; then
+        kill -TERM "$TEST_SAY_PID" 2>/dev/null || true
+        wait "$TEST_SAY_PID" 2>/dev/null || true
+    fi
+    TEST_SAY_PID=""
+    if [ "$TEST_AUDIO_MODIFIED" -eq 1 ]; then
+        restore_sys_audio "$TEST_ORIG_VOL" "$TEST_ORIG_MUTED" || printf 'Warning: audio state could not be restored.\n' >&2
+        TEST_AUDIO_MODIFIED=0
+    fi
+}
+
+prepare_voice_test() {
+    local settings
+    settings=$(get_audio_settings) || {
+        echo "Audio settings are unavailable; test cancelled."
+        return 1
+    }
+    read -r TEST_ORIG_VOL TEST_ORIG_MUTED <<< "$settings"
+    TEST_AUDIO_MODIFIED=0
+    if [ "$TEST_ORIG_MUTED" = "true" ]; then
+        set_sys_muted false || return 1
+        TEST_AUDIO_MODIFIED=1
+    fi
+    if [ "$TEST_ORIG_VOL" -lt "$ALERT_VOLUME" ]; then
+        set_sys_volume "$ALERT_VOLUME" || {
+            cleanup_voice_test
+            return 1
+        }
+        TEST_AUDIO_MODIFIED=1
+    fi
+    trap 'cleanup_voice_test; exit 130' INT
+    trap 'cleanup_voice_test; exit 143' TERM
+    trap 'cleanup_voice_test; exit 129' HUP
+}
+
+finish_voice_test() {
+    cleanup_voice_test
+    trap - INT TERM HUP
+}
+
+speak_test_once() {
+    local message="$1"
+    prepare_voice_test || return 1
+    echo "Speaking: \"$message\"..."
+    say "$message"
+    local result=$?
+    finish_voice_test
+    return "$result"
+}
+
+run_interrupt_test() {
+    local mode="$1" message="$2" start_source active_volume check_seconds settings current_volume current_muted index
+    get_battery_state || {
+        echo "Battery status is unavailable; test cancelled."
+        return 1
+    }
+    start_source="$BATTERY_SOURCE"
+    prepare_voice_test || return 1
+    active_volume="$TEST_ORIG_VOL"
+    [ "$active_volume" -lt "$ALERT_VOLUME" ] && active_volume="$ALERT_VOLUME"
+    check_seconds=$(awk -v ms="$CHECK_INTERVAL_MS" 'BEGIN { printf "%.3f", ms / 1000 }')
+
+    index=1
+    while [ "$index" -le 10 ]; do
+        echo "[Repetition $index/10] Change charger state or press Mute/Volume Down."
+        say "$message" &
+        TEST_SAY_PID=$!
+        while kill -0 "$TEST_SAY_PID" 2>/dev/null; do
+            if get_battery_state; then
+                if [ "$mode" = "charger" ] && [ "$BATTERY_SOURCE" != "$start_source" ]; then
+                    echo ">>> SUCCESS: power-source change detected immediately."
+                    finish_voice_test
+                    return 0
+                fi
+            fi
+            if settings=$(get_audio_settings); then
+                read -r current_volume current_muted <<< "$settings"
+                if [ "$current_muted" = "true" ] || [ "$current_volume" -lt "$active_volume" ]; then
+                    echo ">>> SUCCESS: hardware audio change detected immediately."
+                    TEST_AUDIO_MODIFIED=0
+                    finish_voice_test
+                    return 0
+                fi
+            fi
+            sleep "$check_seconds"
+        done
+        wait "$TEST_SAY_PID" 2>/dev/null || true
+        TEST_SAY_PID=""
+        sleep 0.1
+        index=$((index + 1))
+    done
+    finish_voice_test
+    echo "Test completed without an interruption."
+}
+
 test_voice_interruption() {
-    load_config
+    load_config || return
     echo ""
     echo "─── Test Voice & Silencing Cutoffs ───────────────────────────────────────"
     echo "  1) Speak a custom word or phrase once"
     echo "  2) Speak an existing alert phrase once"
-    echo "  3) Test Charger Cutoff (Plug / Unplug test)"
-    echo "  4) Test Keyboard Mute & Volume Down Key Silencing"
+    echo "  3) Test charger cutoff"
+    echo "  4) Test keyboard Mute or Volume Down cutoff"
     echo "  5) Return to Main Menu"
     echo "──────────────────────────────────────────────────────────────────────────"
-    local tchoice
+    local tchoice custom_phrase idx=1 midx start_key
     if ! prompt_number "Enter choice [1-5] (or 'c' to cancel): " 1 5 "5" tchoice; then
         return
     fi
 
     case "$tchoice" in
         1)
-            read -r -p "Phrase to say (or 'c' to cancel): " custom_phrase
-            if [ "$custom_phrase" = "c" ] || [ "$custom_phrase" = "C" ]; then echo "Cancelled."; return; fi
-            if [ -n "$custom_phrase" ]; then
-                local audio_info
-                audio_info=$(get_audio_settings)
-                local orig_v orig_m
-                orig_v=$(echo "$audio_info" | awk '{print $1}')
-                orig_m=$(echo "$audio_info" | awk '{print $2}')
-
-                set_sys_muted false
-                if [ "$orig_v" -lt "$ALERT_VOLUME" ]; then set_sys_volume "$ALERT_VOLUME"; fi
-                echo "Speaking: \"$custom_phrase\" at ${ALERT_VOLUME}% volume..."
-                say "$custom_phrase"
-
-                set_sys_volume "$orig_v"
-                if [ "$orig_m" = "true" ]; then set_sys_muted true; fi
-                echo "Restored volume to ${orig_v}%."
-            fi
+            if ! read -r -p "Phrase to say (or 'c' to cancel): " custom_phrase; then return; fi
+            [ "$custom_phrase" = "c" ] || [ "$custom_phrase" = "C" ] || [ -z "$custom_phrase" ] || speak_test_once "$custom_phrase"
             ;;
         2)
-            local idx=1
             for alert in "${ALERTS[@]}"; do
                 parse_alert_entry "$alert"
                 printf "  [%d] \"%s\"\n" "$idx" "$PARSED_MSG"
-                ((idx++))
+                idx=$((idx + 1))
             done
-            local midx
-            if ! prompt_number "Choose message number [1-${#ALERTS[@]}] (or 'c' to cancel): " 1 "${#ALERTS[@]}" "" midx; then
-                return
-            fi
-
+            if ! prompt_number "Choose message number [1-${#ALERTS[@]}] (or 'c' to cancel): " 1 "${#ALERTS[@]}" "" midx; then return; fi
             parse_alert_entry "${ALERTS[$((midx - 1))]}"
-            local audio_info
-            audio_info=$(get_audio_settings)
-            local orig_v orig_m
-            orig_v=$(echo "$audio_info" | awk '{print $1}')
-            orig_m=$(echo "$audio_info" | awk '{print $2}')
-
-            set_sys_muted false
-            if [ "$orig_v" -lt "$ALERT_VOLUME" ]; then set_sys_volume "$ALERT_VOLUME"; fi
-            echo "Speaking: \"$PARSED_MSG\"..."
-            say "$PARSED_MSG"
-
-            set_sys_volume "$orig_v"
-            if [ "$orig_m" = "true" ]; then set_sys_muted true; fi
-            echo "Restored volume to ${orig_v}%."
+            speak_test_once "$PARSED_MSG"
             ;;
-        3)
-            echo "─── Live Charger Cutoff Test ─────────────────────────────────────────────"
-            local test_type="LOW"
-            local test_msg="Charge up your battery"
-            if is_ac_power; then
-                test_type="HIGH"
-                test_msg="The battery is optimally charged"
-                echo "Status: PLUGGED IN. Unplug charger anytime to verify cutoff!"
-            else
-                test_type="LOW"
-                test_msg="Charge up your battery"
-                echo "Status: ON BATTERY. Plug in charger anytime to verify cutoff!"
-            fi
-            echo "──────────────────────────────────────────────────────────────────────────"
-            read -r -p "Press [Enter] to begin test (or 'c' to cancel)..." start_key
-            if [ "$start_key" = "c" ] || [ "$start_key" = "C" ]; then echo "Cancelled."; return; fi
-
-            local audio_info
-            audio_info=$(get_audio_settings)
-            local orig_v orig_m
-            orig_v=$(echo "$audio_info" | awk '{print $1}')
-            orig_m=$(echo "$audio_info" | awk '{print $2}')
-
-            set_sys_muted false
-            if [ "$orig_v" -lt "$ALERT_VOLUME" ]; then set_sys_volume "$ALERT_VOLUME"; fi
-
-            restore_test_vol() {
-                set_sys_volume "$orig_v"
-                if [ "$orig_m" = "true" ]; then set_sys_muted true; fi
-                echo "Volume restored to ${orig_v}%."
-            }
-
-            local check_sec
-            check_sec=$(awk -v ms="$CHECK_INTERVAL_MS" 'BEGIN { printf "%.3f", ms / 1000 }')
-            local check_count
-            check_count=$(awk -v d="$REPEAT_DELAY_MS" -v c="$CHECK_INTERVAL_MS" 'BEGIN { r = int(d / c); if (r < 1) r = 1; print r }')
-
-            for ((i=1; i<=10; i++)); do
-                echo "[Rep $i/10] Speaking..."
-                say "$test_msg" &
-                local say_pid=$!
-
-                while kill -0 "$say_pid" 2>/dev/null; do
-                    if [ "$test_type" = "LOW" ] && is_ac_power; then
-                        kill -9 "$say_pid" 2>/dev/null
-                        wait "$say_pid" 2>/dev/null
-                        echo ">>> SUCCESS! Charger connected! Cut off immediately."
-                        restore_test_vol
-                        return
-                    fi
-                    if [ "$test_type" = "HIGH" ] && ! is_ac_power; then
-                        kill -9 "$say_pid" 2>/dev/null
-                        wait "$say_pid" 2>/dev/null
-                        echo ">>> SUCCESS! Charger disconnected! Cut off immediately."
-                        restore_test_vol
-                        return
-                    fi
-                    sleep "$check_sec"
-                done
-
-                for ((c=0; c<check_count; c++)); do
-                    if [ "$test_type" = "LOW" ] && is_ac_power; then
-                        echo ">>> SUCCESS! Charger connected during pause! Stopped."
-                        restore_test_vol
-                        return
-                    fi
-                    if [ "$test_type" = "HIGH" ] && ! is_ac_power; then
-                        echo ">>> SUCCESS! Charger disconnected during pause! Stopped."
-                        restore_test_vol
-                        return
-                    fi
-                    sleep "$check_sec"
-                done
-            done
-            restore_test_vol
+        3|4)
+            if ! read -r -p "Press [Enter] to begin (or 'c' to cancel): " start_key; then return; fi
+            [ "$start_key" = "c" ] || [ "$start_key" = "C" ] || run_interrupt_test "$([ "$tchoice" = "3" ] && echo charger || echo audio)" "Charge up your battery now"
             ;;
-        4)
-            echo "─── Keyboard Mute & Volume Down Key Test ─────────────────────────────────"
-            echo "While it speaks: Press MUTE (F10) or VOLUME DOWN (F11) on keyboard!"
-            echo "──────────────────────────────────────────────────────────────────────────"
-            read -r -p "Press [Enter] to begin test (or 'c' to cancel)..." start_key
-            if [ "$start_key" = "c" ] || [ "$start_key" = "C" ]; then echo "Cancelled."; return; fi
-
-            local audio_info
-            audio_info=$(get_audio_settings)
-            local orig_v orig_m
-            orig_v=$(echo "$audio_info" | awk '{print $1}')
-            orig_m=$(echo "$audio_info" | awk '{print $2}')
-
-            set_sys_muted false
-            if [ "$orig_v" -lt "$ALERT_VOLUME" ]; then
-                set_sys_volume "$ALERT_VOLUME"
-                local active_v="$ALERT_VOLUME"
-            else
-                local active_v="$orig_v"
-            fi
-
-            local check_sec
-            check_sec=$(awk -v ms="$CHECK_INTERVAL_MS" 'BEGIN { printf "%.3f", ms / 1000 }')
-            local check_count
-            check_count=$(awk -v d="$REPEAT_DELAY_MS" -v c="$CHECK_INTERVAL_MS" 'BEGIN { r = int(d / c); if (r < 1) r = 1; print r }')
-
-            for ((i=1; i<=10; i++)); do
-                echo "[Rep $i/10] Speaking... Press MUTE or VOLUME DOWN now!"
-                say "Charge up your battery now" &
-                local say_pid=$!
-
-                while kill -0 "$say_pid" 2>/dev/null; do
-                    local cur_info
-                    cur_info=$(get_audio_settings)
-                    local cv cm
-                    cv=$(echo "$cur_info" | awk '{print $1}')
-                    cm=$(echo "$cur_info" | awk '{print $2}')
-
-                    if [ "$cm" = "true" ]; then
-                        kill -9 "$say_pid" 2>/dev/null
-                        wait "$say_pid" 2>/dev/null
-                        echo ">>> SUCCESS! Mute key detected! Cut off instantly; Mac remains muted."
-                        return
-                    fi
-                    if [ -n "$cv" ] && [ "$cv" -lt "$((active_v - 3))" ]; then
-                        kill -9 "$say_pid" 2>/dev/null
-                        wait "$say_pid" 2>/dev/null
-                        echo ">>> SUCCESS! Volume Down detected (dropped to ${cv}%)! Cut off instantly."
-                        return
-                    fi
-                    sleep "$check_sec"
-                done
-
-                for ((c=0; c<check_count; c++)); do
-                    local cur_info
-                    cur_info=$(get_audio_settings)
-                    local cv cm
-                    cv=$(echo "$cur_info" | awk '{print $1}')
-                    cm=$(echo "$cur_info" | awk '{print $2}')
-
-                    if [ "$cm" = "true" ]; then
-                        echo ">>> SUCCESS! Mute key detected during pause! Mac remains muted."
-                        return
-                    fi
-                    if [ -n "$cv" ] && [ "$cv" -lt "$((active_v - 3))" ]; then
-                        echo ">>> SUCCESS! Volume Down detected during pause! Kept at ${cv}%."
-                        return
-                    fi
-                    sleep "$check_sec"
-                done
-            done
-            ;;
-        *)
-            return
-            ;;
+        5) return ;;
     esac
 }
 
@@ -897,8 +790,13 @@ service_menu() {
             3) service_restart ;;
             4)
                 echo "Running monitor check..."
-                /bin/bash "$RUNTIME_DIR/battery_monitor.sh"
-                echo "Done. State: $(cat "$STATE_FILE" 2>/dev/null || echo 'none')"
+                ensure_active_config && sync_runtime_files && /bin/bash "$RUNTIME_DIR/battery_monitor.sh"
+                local monitor_result=$?
+                if [ "$monitor_result" -eq 0 ]; then
+                    echo "Monitor check completed."
+                else
+                    echo "Monitor check failed with exit code $monitor_result."
+                fi
                 ;;
             5) break ;;
         esac
@@ -907,21 +805,26 @@ service_menu() {
 
 main_menu() {
     while true; do
-        load_config
-        local pct
-        pct=$(get_battery_percent)
-        local pwr="On Battery"
-        if is_ac_power; then pwr="Currently Charging"; fi
-        local audio_info
-        audio_info=$(get_audio_settings)
-        local cur_v
-        cur_v=$(echo "$audio_info" | awk '{print $1}')
+        load_config || {
+            echo "Configuration is invalid. Run 'battmon doctor' for details."
+            return 1
+        }
+        local pct="N/A" pwr="Power unavailable" audio_info="" cur_v="N/A" cur_muted=""
+        if get_battery_state; then
+            pct="$BATTERY_PERCENT"
+            pwr=$(battery_status_label)
+        fi
+        if audio_info=$(get_audio_settings); then
+            read -r cur_v cur_muted <<< "$audio_info"
+            [ "$cur_muted" = "true" ] && cur_v="${cur_v}M"
+        fi
 
         clear 2>/dev/null || echo ""
         echo "─── BATTMON 🦇 Battery Voice Monitor ─────────────────────────────────────"
         local bat_str=" Battery: ${pct}% (${pwr})"
+        [ "$pct" = "N/A" ] && bat_str=" Battery: Not detected"
         local vol_str=" Volume target: ${ALERT_VOLUME}%"
-        printf "%-36s | Current system volume: %s%%\n" "$bat_str" "${cur_v}"
+        printf "%-36s | Current volume: %s\n" "$bat_str" "${cur_v}"
         printf "%-36s | Silencing: Charger or MUTE/VOL-DOWN\n" "$vol_str"
         echo "──────────────────────────────────────────────────────────────────────────"
         echo " Configured Alerts:"
@@ -947,7 +850,11 @@ main_menu() {
         printf "  5) Change repeat & pause delay  11) Exit Battmon\n"
         printf "  6) Apply to existing rules\n"
         echo "──────────────────────────────────────────────────────────────────────────"
-        read -r -p " Enter choice [1-11] (or 'c' to exit): " choice
+        if ! read -r -p " Enter choice [1-11] (or 'c' to exit): " choice; then
+            echo ""
+            echo "Input closed. Goodbye!"
+            return 0
+        fi
 
         if [ "$choice" = "c" ] || [ "$choice" = "C" ]; then
             echo "Goodbye!"
@@ -980,6 +887,61 @@ main_menu() {
     done
 }
 
+doctor() {
+    local failures=0 command_name settings
+    echo "─── BATTMON DOCTOR ───────────────────────────────────────────────────────"
+    if [ "$(uname -s)" = "Darwin" ]; then
+        echo " [OK] macOS detected"
+    else
+        echo " [FAIL] Battmon requires macOS"
+        failures=$((failures + 1))
+    fi
+    for command_name in pmset say launchctl osascript awk sed sort mktemp plutil; do
+        if command -v "$command_name" >/dev/null 2>&1; then
+            printf ' [OK] %s\n' "$command_name"
+        else
+            printf ' [FAIL] Missing built-in command: %s\n' "$command_name"
+            failures=$((failures + 1))
+        fi
+    done
+    if load_config; then
+        printf ' [OK] Config valid (%d normalized rules)\n' "${#ALERTS[@]}"
+        [ -n "$CONFIG_WARNING" ] && printf ' [WARN] %s\n' "$CONFIG_WARNING"
+    else
+        echo " [FAIL] Configuration could not be loaded"
+        failures=$((failures + 1))
+    fi
+    if get_battery_state; then
+        printf ' [OK] Battery %s%% — %s\n' "$BATTERY_PERCENT" "$(battery_status_label)"
+    else
+        echo " [FAIL] No supported internal battery detected"
+        failures=$((failures + 1))
+    fi
+    if settings=$(get_audio_settings); then
+        printf ' [OK] Audio settings readable (%s)\n' "$settings"
+    else
+        echo " [FAIL] Audio settings unavailable in this session"
+        failures=$((failures + 1))
+    fi
+    if [ -f "$PLIST_DST" ] && plutil -lint "$PLIST_DST" >/dev/null 2>&1; then
+        echo " [OK] LaunchAgent plist valid"
+    else
+        echo " [INFO] LaunchAgent is not installed"
+    fi
+    if is_service_running; then
+        echo " [OK] Background service loaded"
+    else
+        echo " [INFO] Background service stopped"
+    fi
+    echo "──────────────────────────────────────────────────────────────────────────"
+    if [ "$failures" -eq 0 ]; then
+        echo "Battmon doctor found no blocking errors."
+    else
+        echo "Battmon doctor found $failures blocking error(s)."
+        return 1
+    fi
+}
+
 case "$1" in
     -h|--help|help)
         show_help
@@ -997,8 +959,7 @@ case "$1" in
         service_restart
         ;;
     run)
-        sync_runtime_files
-        /bin/bash "$RUNTIME_DIR/battery_monitor.sh"
+        /bin/bash "$SCRIPT_DIR/battery_monitor.sh"
         ;;
     test)
         test_voice_interruption
@@ -1010,10 +971,25 @@ case "$1" in
         install_symlinks
         ;;
     edit)
+        ensure_active_config || exit 1
         "${EDITOR:-nano}" "$CONFIG_FILE"
-        sync_runtime_files
+        load_config || exit 1
+        save_config
+        ;;
+    doctor)
+        doctor
+        ;;
+    migrate|migrate-config)
+        ensure_active_config || exit 1
+        load_config || exit 1
+        save_config
+        ;;
+    "")
+        main_menu
         ;;
     *)
-        main_menu
+        printf 'Battmon: unknown command: %s\n\n' "$1" >&2
+        show_help >&2
+        exit 2
         ;;
 esac
