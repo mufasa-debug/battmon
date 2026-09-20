@@ -330,6 +330,13 @@ show_trigger_choices() {
     echo "      Starts at ${level}%. Plug in the charger to stop the voice."
 }
 
+show_automatic_low_type() {
+    local level="$1"
+    echo "Alert type: LOW-BATTERY ALERT (automatic below 30%)."
+    echo "The voice starts when the battery drops to ${level}%."
+    echo "Plug in the charger to stop the voice."
+}
+
 prompt_repeat_behavior() {
     local current_repeat="$1" alert_type="$2" result_var="$3"
     local default_choice=1 choice fixed_default stop_action
@@ -409,19 +416,31 @@ edit_alert_at_index() {
     echo "Percentage: ${lvl}% (Fixed)"
     echo "──────────────────────────────────────────────────────────────────────────"
 
-    echo "1. Alert type:"
-    show_trigger_choices "$lvl"
-    local cur_choice=1
-    if [ "$PARSED_TYP" = "LOW" ]; then cur_choice=2; fi
-    local trig_sel current_type_name
-    current_type_name=$(alert_type_plain_name "$PARSED_TYP")
-    if ! prompt_number "Choose 1 or 2 (Enter keeps ${current_type_name}; 'c' cancels): " 1 2 "$cur_choice" trig_sel; then
-        return
+    local new_typ message_step repeat_step delay_step
+    if is_automatic_low_level "$lvl"; then
+        new_typ="LOW"
+        message_step=1
+        repeat_step=2
+        delay_step=3
+        show_automatic_low_type "$lvl"
+    else
+        echo "1. Alert type:"
+        show_trigger_choices "$lvl"
+        local cur_choice=1
+        if [ "$PARSED_TYP" = "LOW" ]; then cur_choice=2; fi
+        local trig_sel current_type_name
+        current_type_name=$(alert_type_plain_name "$PARSED_TYP")
+        if ! prompt_number "Choose 1 or 2 (Enter keeps ${current_type_name}; 'c' cancels): " 1 2 "$cur_choice" trig_sel; then
+            return
+        fi
+        new_typ="HIGH"
+        if [ "$trig_sel" = "2" ]; then new_typ="LOW"; fi
+        message_step=2
+        repeat_step=3
+        delay_step=4
     fi
-    local new_typ="HIGH"
-    if [ "$trig_sel" = "2" ]; then new_typ="LOW"; fi
 
-    if ! read -r -p "2. Spoken message (Press Enter for \"${PARSED_MSG}\", or 'c' to cancel): " new_msg; then
+    if ! read -r -p "${message_step}. Spoken message (Press Enter for \"${PARSED_MSG}\", or 'c' to cancel): " new_msg; then
         echo "Input closed; no changes saved."
         return
     fi
@@ -429,13 +448,13 @@ edit_alert_at_index() {
     new_msg="${new_msg:-$PARSED_MSG}"
 
     local new_rep
-    echo "3. Repeat behavior:"
+    echo "${repeat_step}. Repeat behavior:"
     if ! prompt_repeat_behavior "$PARSED_REP" "$new_typ" new_rep; then
         return
     fi
 
     local new_del
-    if ! prompt_number "4. Pause delay in milliseconds (min 50 ms) (Press Enter for ${PARSED_DEL} ms, or 'c' to cancel): " 50 60000 "$PARSED_DEL" new_del; then
+    if ! prompt_number "${delay_step}. Pause delay in milliseconds (min 50 ms) (Press Enter for ${PARSED_DEL} ms, or 'c' to cancel): " 50 60000 "$PARSED_DEL" new_del; then
         return
     fi
 
@@ -536,16 +555,29 @@ add_alert() {
         fi
     done
 
-    echo "2. Alert type:"
-    show_trigger_choices "$new_lvl"
-    local trig_choice
-    if ! prompt_number "Choose 1 or 2 (Enter selects Charging alert; 'c' cancels): " 1 2 "1" trig_choice; then
-        return
+    local new_typ message_step repeat_step delay_step
+    if is_automatic_low_level "$new_lvl"; then
+        new_typ="LOW"
+        message_step=2
+        repeat_step=3
+        delay_step=4
+        echo ""
+        show_automatic_low_type "$new_lvl"
+    else
+        echo "2. Alert type:"
+        show_trigger_choices "$new_lvl"
+        local trig_choice
+        if ! prompt_number "Choose 1 or 2 (Enter selects Charging alert; 'c' cancels): " 1 2 "1" trig_choice; then
+            return
+        fi
+        new_typ="HIGH"
+        if [ "$trig_choice" = "2" ]; then new_typ="LOW"; fi
+        message_step=3
+        repeat_step=4
+        delay_step=5
     fi
-    local new_typ="HIGH"
-    if [ "$trig_choice" = "2" ]; then new_typ="LOW"; fi
 
-    if ! read -r -p "3. Spoken message (Press Enter for 'Battery is at $new_lvl percent', or 'c' to cancel): " new_msg; then
+    if ! read -r -p "${message_step}. Spoken message (Press Enter for 'Battery is at $new_lvl percent', or 'c' to cancel): " new_msg; then
         echo "Input closed; no changes saved."
         return
     fi
@@ -553,13 +585,13 @@ add_alert() {
     if [ -z "$new_msg" ]; then new_msg="Battery is at $new_lvl percent"; fi
 
     local new_rep
-    echo "4. Repeat behavior:"
+    echo "${repeat_step}. Repeat behavior:"
     if ! prompt_repeat_behavior "${REPEAT_COUNT:-10}" "$new_typ" new_rep; then
         return
     fi
 
     local new_del
-    if ! prompt_number "5. Pause delay in milliseconds (minimum 50 ms) (Press Enter for ${REPEAT_DELAY_MS:-100} ms, or 'c' to cancel): " 50 60000 "${REPEAT_DELAY_MS:-100}" new_del; then
+    if ! prompt_number "${delay_step}. Pause delay in milliseconds (minimum 50 ms) (Press Enter for ${REPEAT_DELAY_MS:-100} ms, or 'c' to cancel): " 50 60000 "${REPEAT_DELAY_MS:-100}" new_del; then
         return
     fi
 

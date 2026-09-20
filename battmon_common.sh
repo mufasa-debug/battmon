@@ -47,6 +47,10 @@ is_valid_alert_repeat() {
     [ "$1" = "0" ] || is_integer_in_range "$1" 1 100
 }
 
+is_automatic_low_level() {
+    is_integer_in_range "$1" 1 100 && [ "$1" -lt 30 ]
+}
+
 config_signature() {
     local path="$1"
     [ -f "$path" ] || return 1
@@ -116,6 +120,10 @@ normalize_config() {
         if [ "$PARSED_TYP" != "LOW" ] && [ "$PARSED_TYP" != "HIGH" ]; then
             warnings="${warnings}skipped invalid alert type; "
             continue
+        fi
+        if is_automatic_low_level "$PARSED_LVL" && [ "$PARSED_TYP" != "LOW" ]; then
+            PARSED_TYP="LOW"
+            warnings="${warnings}changed below-30% alert to LOW; "
         fi
         if ! is_valid_alert_repeat "$PARSED_REP"; then
             warnings="${warnings}skipped invalid alert repeat; "

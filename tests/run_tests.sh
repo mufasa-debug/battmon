@@ -546,6 +546,40 @@ else
     fail "trigger choices explain direction and stop behavior plainly"
 fi
 
+# Percentages below 30 are always LOW and skip the ambiguous type question.
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "10:LOW:1:100:ten percent"
+auto_low_add_output=$(printf '2\n25\n\n2\n\n11\n' | env HOME="$CASE_HOME" \
+    PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
+    TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
+    TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" 2>&1)
+if env HOME="$CASE_HOME" /bin/bash -c 'source "$1"; for rule in "${ALERTS[@]}"; do [[ "$rule" == 25:LOW:0:100:* ]] && exit 0; done; exit 1' _ \
+    "$CASE_HOME/.battmon/battery_config.sh" && \
+    [[ "$auto_low_add_output" == *"LOW-BATTERY ALERT (automatic below 30%)"* ]] && \
+    [[ "$auto_low_add_output" == *"Plug in the charger to stop the voice."* ]] && \
+    [[ "$auto_low_add_output" != *"Choose when this voice alert should play:"* ]]; then
+    pass "new below-30 alerts automatically use LOW and skip type input"
+else
+    fail "new below-30 alerts automatically use LOW and skip type input"
+fi
+
+# A manually configured legacy HIGH rule below 30 is normalized and its edit
+# flow also skips type input.
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "25:HIGH:1:100:legacy alert"
+auto_low_edit_output=$(printf '1\n1\n\n2\n\n11\n' | env HOME="$CASE_HOME" \
+    PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
+    TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
+    TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" 2>&1)
+if env HOME="$CASE_HOME" /bin/bash -c 'source "$1"; [[ "${ALERTS[*]}" == *"25:LOW:0:100:legacy alert"* ]]' _ \
+    "$CASE_HOME/.battmon/battery_config.sh" && \
+    [[ "$auto_low_edit_output" == *"LOW-BATTERY ALERT (automatic below 30%)"* ]] && \
+    [[ "$auto_low_edit_output" != *"Choose when this voice alert should play:"* ]]; then
+    pass "existing below-30 alerts normalize to LOW and skip type input"
+else
+    fail "existing below-30 alerts normalize to LOW and skip type input"
+fi
+
 write_config "$CASE_HOME/.battmon/battery_config.sh" \
     "80:HIGH:1:100:eighty percent" "10:LOW:1:100:ten percent"
 status_output=$(env HOME="$CASE_HOME" PATH="$TEST_BIN:$ORIGINAL_PATH" \
@@ -574,13 +608,13 @@ else
     fail "new alerts can use clear Until stopped behavior"
 fi
 
-edit_output=$(printf '1\n2\n\n\n2\n\n11\n' | env HOME="$CASE_HOME" \
+edit_output=$(printf '1\n2\n\n2\n\n11\n' | env HOME="$CASE_HOME" \
     PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
     TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
     TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" 2>&1)
 if env HOME="$CASE_HOME" /bin/bash -c 'source "$1"; for rule in "${ALERTS[@]}"; do [[ "$rule" == 10:LOW:0:100:* ]] && exit 0; done; exit 1' _ \
     "$CASE_HOME/.battmon/battery_config.sh" && \
-    [[ "$edit_output" == *"3. Repeat behavior:"* ]]; then
+    [[ "$edit_output" == *"2. Repeat behavior:"* ]]; then
     pass "existing alerts can be changed to Until stopped"
 else
     fail "existing alerts can be changed to Until stopped"

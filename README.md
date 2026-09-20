@@ -62,6 +62,7 @@ The default pause is **100 ms**. Values from **50 ms through 60,000 ms** are acc
 
 - **Charging alert** (stored as `HIGH`): speaks when the battery goes up to the chosen percentage. The voice stops when charging stops or the charger is unplugged.
 - **Low-battery alert** (stored as `LOW`): speaks when the battery goes down to the chosen percentage. The voice stops when charging starts.
+- Percentages below **30%** are always low-battery alerts. Battmon skips the type question and clearly states that plugging in the charger stops the voice.
 - Low-battery alerts use the battery's real direction, including the unusual case where an adapter is attached but the battery is still going down.
 - If several thresholds are crossed between checks, Battmon selects the most relevant critical threshold instead of losing all of them.
 - Duplicate percentage/type messages are merged deterministically so no phrase silently becomes unreachable.

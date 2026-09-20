@@ -42,7 +42,7 @@ LEVEL:TYPE:REPEAT_COUNT:PAUSE_DELAY_MS:MESSAGE
 ```
 
 - Level: 1–100
-- Type: `LOW` or `HIGH`
+- Type: `LOW` or `HIGH`. Levels below 30 are normalized to `LOW`; their add/edit flows skip type selection.
 - Repeats: 1–100 for fixed mode; `0` means repeat until interrupted
 - Pause: 50–60,000 ms; default 100 ms
 - Message: non-empty text; `{percent}`, `{level}`, and `{pct}` interpolate live battery percentage
