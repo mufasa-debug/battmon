@@ -1,4 +1,4 @@
-# 🦇 Battmon: macOS Battery Voice Monitor & Interactive Manager
+Battmon: macOS Battery Voice Monitor & Interactive Manager
 
 [![Platform](https://img.shields.io/badge/platform-macOS%2010.13+-black?style=flat&logo=apple)](https://www.apple.com/macos/)
 [![Language](https://img.shields.io/badge/language-Bash%20%7C%20AppleScript-green.svg?style=flat)](https://www.gnu.org/software/bash/)
