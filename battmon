@@ -1232,6 +1232,11 @@ doctor() {
     else
         echo " [INFO] LaunchAgent is not installed"
     fi
+    if command -v battmon >/dev/null 2>&1; then
+        printf ' [OK] Command in PATH (%s)\n' "$(command -v battmon)"
+    else
+        echo " [INFO] 'battmon' is not in current PATH. To fix: export PATH=\"\$HOME/.local/bin:\$PATH\""
+    fi
     if is_service_running; then
         echo " [OK] Background service loaded"
     else

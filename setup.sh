@@ -157,6 +157,7 @@ uninstall_battmon() {
     stop_service
     rm -f "$PLIST_PATH"
     remove_managed_link "$LINK_PATH"
+    remove_managed_link "/usr/local/bin/battmon" 2>/dev/null || true
 
     local alias_name
     for alias_name in Battmon batmon Batmon battery battery-monitor; do
@@ -233,6 +234,46 @@ copy_atomic() {
     mv -f "$temp_path" "$destination_path"
 }
 
+configure_shell_path() {
+    local shell_name target_files=() file export_line
+    shell_name=$(basename "${SHELL:-/bin/zsh}")
+    case "$shell_name" in
+        zsh)
+            target_files=("$HOME/.zshrc" "$HOME/.zprofile")
+            ;;
+        bash)
+            target_files=("$HOME/.bash_profile" "$HOME/.bashrc")
+            ;;
+        fish)
+            [ -d "$HOME/.config/fish" ] && target_files=("$HOME/.config/fish/config.fish")
+            ;;
+        *)
+            target_files=("$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.bash_profile")
+            ;;
+    esac
+
+    export_line="export PATH=\"$BIN_DIR:\$PATH\""
+
+    for file in "${target_files[@]}"; do
+        if [ ! -f "$file" ]; then
+            touch "$file" 2>/dev/null || continue
+        fi
+        if ! grep -q -F "$BIN_DIR" "$file" 2>/dev/null; then
+            printf '\n# Battmon CLI path\n%s\n' "$export_line" >> "$file" 2>/dev/null || true
+        fi
+    done
+}
+
+is_bin_in_path() {
+    case ":$PATH:" in
+        *":$BIN_DIR:"*) return 0 ;;
+    esac
+    if command -v battmon >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
 prepare_command_link() {
     mkdir -p "$BIN_DIR" || return 1
     if [ -e "$LINK_PATH" ] || [ -L "$LINK_PATH" ]; then
@@ -248,6 +289,15 @@ prepare_command_link() {
         remove_managed_link "$BIN_DIR/$alias_name"
     done
     ln -s "$RUNTIME_DIR/battmon" "$LINK_PATH"
+
+    # Also link to /usr/local/bin if available and writable by user
+    if [ -d "/usr/local/bin" ] && [ -w "/usr/local/bin" ]; then
+        if [ ! -e "/usr/local/bin/battmon" ] || managed_link_target "/usr/local/bin/battmon"; then
+            ln -sf "$RUNTIME_DIR/battmon" "/usr/local/bin/battmon" 2>/dev/null || true
+        fi
+    fi
+
+    configure_shell_path
 }
 
 preserve_or_seed_config() {
@@ -347,6 +397,12 @@ install_battmon() {
     echo "Command: $LINK_PATH"
     echo "Config : $RUNTIME_DIR/battery_config.sh"
     echo "Logs   : $LOG_FILE"
+    if ! is_bin_in_path; then
+        echo ""
+        echo "💡 Next step to run 'battmon' in this terminal window:"
+        echo "   export PATH=\"$BIN_DIR:\$PATH\""
+        echo "   (Or open a new Terminal tab/window — your shell profile has been updated!)"
+    fi
 }
 
 if [ "$UNINSTALL" -eq 1 ]; then
