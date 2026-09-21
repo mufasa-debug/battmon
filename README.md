@@ -1,4 +1,4 @@
-Battmon: macOS Battery Voice Monitor & Interactive Manager
+**Battmon: macOS Battery Voice Monitor & Interactive Manager**
 
 [![Platform](https://img.shields.io/badge/platform-macOS%2010.13+-black?style=flat&logo=apple)](https://www.apple.com/macos/)
 [![Language](https://img.shields.io/badge/language-Bash%20%7C%20AppleScript-green.svg?style=flat)](https://www.gnu.org/software/bash/)
@@ -6,7 +6,7 @@ Battmon: macOS Battery Voice Monitor & Interactive Manager
 [![UI](https://img.shields.io/badge/interface-80x24%20Terminal%20TUI-orange.svg?style=flat)](#-interactive-tui-preview)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat)](LICENSE)
 
-> **A native, zero-dependency macOS battery voice-alert daemon and terminal manager.**
+> **A native macOS battery voice-alert daemon and terminal manager.**
 > Speaks customizable voice alerts at any battery percentage (charging or discharging), automatically boosts system audio, and **instantly cuts off speech** when you plug in, unplug, or press your keyboard's **Mute (F10)** or **Volume Down (F11)** keys.
 
 ---
