@@ -383,6 +383,36 @@ prompt_repeat_behavior() {
     prompt_number "How many times? [1-100] (Press Enter for ${fixed_default}, or 'c' to cancel): " 1 100 "$fixed_default" "$result_var"
 }
 
+prompt_bulk_repeat_behavior() {
+    local fixed_default="$1" result_var="$2"
+    local choice
+
+    echo "Repeat behavior for all existing alerts:"
+    echo "   1) Fixed number — set every alert to the same repeat count"
+    echo "   2) Until stopped — keep every alert speaking until you stop it"
+    echo "      Stop with Mute, Volume Down, or the appropriate charger change."
+    if ! prompt_number "Choose 1 or 2 (Enter selects Fixed number; 'c' cancels): " 1 2 "1" choice; then
+        return 1
+    fi
+    if [ "$choice" = "2" ]; then
+        eval "$result_var=0"
+        return 0
+    fi
+    prompt_number "How many times? [1-100] (Press Enter for ${fixed_default}, or 'c' to cancel): " 1 100 "$fixed_default" "$result_var"
+}
+
+set_all_alert_timing() {
+    local repeat_count="$1" delay_ms="$2"
+    local updated_alerts=()
+    local alert
+
+    for alert in "${ALERTS[@]}"; do
+        parse_alert_entry "$alert"
+        updated_alerts+=("${PARSED_LVL}:${PARSED_TYP}:${repeat_count}:${delay_ms}:${PARSED_MSG}")
+    done
+    ALERTS=("${updated_alerts[@]}")
+}
+
 show_status() {
     load_config || return 1
     local pct="N/A" pwr="Power state unavailable"
@@ -699,19 +729,29 @@ edit_timing() {
         return
     fi
     if [ "$apply_confirm" = "y" ] || [ "$apply_confirm" = "Y" ] || [ "$apply_confirm" = "yes" ]; then
-        local updated_alerts=()
-        for alert in "${ALERTS[@]}"; do
-            parse_alert_entry "$alert"
-            if [ "$PARSED_REP" = "0" ]; then
-                updated_alerts+=("${PARSED_LVL}:${PARSED_TYP}:0:${new_del}:${PARSED_MSG}")
-            else
-                updated_alerts+=("${PARSED_LVL}:${PARSED_TYP}:${new_cnt}:${new_del}:${PARSED_MSG}")
-            fi
-        done
-        ALERTS=("${updated_alerts[@]}")
+        local bulk_repeat
+        echo ""
+        if ! prompt_bulk_repeat_behavior "$new_cnt" bulk_repeat; then
+            echo "Defaults were saved; existing rules were not changed."
+            return
+        fi
+
+        local repeat_summary
+        repeat_summary="${bulk_repeat} times"
+        [ "$bulk_repeat" = "1" ] && repeat_summary="1 time"
+        [ "$bulk_repeat" = "0" ] && repeat_summary="Until stopped"
+        if ! read -r -p "Set all ${#ALERTS[@]} existing rules to ${repeat_summary} with a ${new_del} ms pause? (y/N): " apply_confirm; then
+            echo "Input closed; existing rules were not changed."
+            return
+        fi
+        case "$apply_confirm" in
+            y|Y|yes|YES) ;;
+            *) echo "Existing rules were not changed."; return ;;
+        esac
+
+        set_all_alert_timing "$bulk_repeat" "$new_del"
         save_config || return
-        echo "  [✔] Updated fixed-repeat rules and set every pause to ${new_del} ms."
-        echo "      Rules set to Until stopped stayed unlimited."
+        echo "  [✔] Updated all ${#ALERTS[@]} existing rules: ${repeat_summary}, ${new_del} ms pause."
         read -r -p "Press [Enter] to return (or 'c')..."
     fi
 }
@@ -720,13 +760,12 @@ apply_timing_to_existing_rules() {
     load_config
     echo ""
     echo "─── Apply Settings to Existing Rules ─────────────────────────────────────"
-    echo "Current settings: Repeat: $REPEAT_COUNT times | Pause: ${REPEAT_DELAY_MS} ms"
+    echo "Current defaults: Repeat: $REPEAT_COUNT times | Pause: ${REPEAT_DELAY_MS} ms"
     echo "Existing rules to update: ${#ALERTS[@]}"
-    echo "Rules set to Until stopped will stay unlimited."
     echo "──────────────────────────────────────────────────────────────────────────"
 
-    local new_cnt
-    if ! prompt_number "Enter repeat count [1-100] (Press Enter for $REPEAT_COUNT, or 'c' to cancel): " 1 100 "$REPEAT_COUNT" new_cnt; then
+    local new_repeat
+    if ! prompt_bulk_repeat_behavior "$REPEAT_COUNT" new_repeat; then
         return
     fi
 
@@ -736,7 +775,11 @@ apply_timing_to_existing_rules() {
     fi
 
     echo ""
-    if ! read -r -p "Update fixed repeats and set every pause to ${new_del} ms? (y/n) (or 'c' to cancel): " confirm; then
+    local repeat_summary
+    repeat_summary="${new_repeat} times"
+    [ "$new_repeat" = "1" ] && repeat_summary="1 time"
+    [ "$new_repeat" = "0" ] && repeat_summary="Until stopped"
+    if ! read -r -p "Set all ${#ALERTS[@]} existing rules to ${repeat_summary} with a ${new_del} ms pause? (y/n) (or 'c' to cancel): " confirm; then
         echo "Input closed; no changes saved."
         return
     fi
@@ -746,21 +789,16 @@ apply_timing_to_existing_rules() {
     fi
 
     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || [ "$confirm" = "yes" ] || [ -z "$confirm" ]; then
-        REPEAT_COUNT="$new_cnt"
+        if [ "$new_repeat" != "0" ]; then
+            REPEAT_COUNT="$new_repeat"
+        fi
         REPEAT_DELAY_MS="$new_del"
-        local updated_alerts=()
-        for alert in "${ALERTS[@]}"; do
-            parse_alert_entry "$alert"
-            if [ "$PARSED_REP" = "0" ]; then
-                updated_alerts+=("${PARSED_LVL}:${PARSED_TYP}:0:${new_del}:${PARSED_MSG}")
-            else
-                updated_alerts+=("${PARSED_LVL}:${PARSED_TYP}:${new_cnt}:${new_del}:${PARSED_MSG}")
-            fi
-        done
-        ALERTS=("${updated_alerts[@]}")
+        set_all_alert_timing "$new_repeat" "$new_del"
         save_config || return
-        echo "  [✔] Updated fixed-repeat rules and set every pause to ${new_del} ms."
-        echo "      Rules set to Until stopped stayed unlimited."
+        echo "  [✔] Updated all ${#ALERTS[@]} existing rules: ${repeat_summary}, ${new_del} ms pause."
+        if [ "$new_repeat" = "0" ]; then
+            echo "      The default for newly added alerts remains ${REPEAT_COUNT} times."
+        fi
         read -r -p "Press [Enter] to return (or 'c')..."
     else
         echo "Cancelled without modifying existing rules."

@@ -1,0 +1,19 @@
+# macOS System Files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Runtime & State Files
+*.log
+*.tmp
+.battmon_state
+.battmon_test_active
+
+# Editor & IDE Directories
+.vscode/
+.idea/
+*.swp
+*~

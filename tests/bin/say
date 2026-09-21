@@ -1,4 +1,7 @@
 #!/bin/bash
+if [ -n "${TEST_SAY_TIMING_LOG:-}" ]; then
+    printf 'start %s\n' "$(/usr/bin/perl -MTime::HiRes=time -e 'printf "%.6f", time')" >> "$TEST_SAY_TIMING_LOG"
+fi
 if [ -n "${TEST_SAY_LOG:-}" ]; then
     printf '%s\n' "$*" >> "$TEST_SAY_LOG"
 fi
@@ -21,5 +24,12 @@ if [[ "${TEST_INTERRUPT_AFTER_SAYS:-0}" =~ ^[0-9]+$ ]] && \
     [ "$(wc -l < "$TEST_SAY_LOG" | tr -d ' ')" -ge "$TEST_INTERRUPT_AFTER_SAYS" ] && \
     [ -n "${TEST_INTERRUPT_FLAG:-}" ]; then
     : > "$TEST_INTERRUPT_FLAG"
+fi
+[ -n "${TEST_SAY_DURATION_SECONDS:-}" ] && /bin/sleep "$TEST_SAY_DURATION_SECONDS"
+if [ "${TEST_CONNECT_CHARGER_AFTER_SAY:-0}" = "1" ] && [ -n "${TEST_CHARGER_FLAG:-}" ]; then
+    : > "$TEST_CHARGER_FLAG"
+fi
+if [ -n "${TEST_SAY_TIMING_LOG:-}" ]; then
+    printf 'end %s\n' "$(/usr/bin/perl -MTime::HiRes=time -e 'printf "%.6f", time')" >> "$TEST_SAY_TIMING_LOG"
 fi
 exit 0

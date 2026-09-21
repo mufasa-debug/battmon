@@ -47,6 +47,8 @@ LEVEL:TYPE:REPEAT_COUNT:PAUSE_DELAY_MS:MESSAGE
 - Pause: 50–60,000 ms; default 100 ms
 - Message: non-empty text; `{percent}`, `{level}`, and `{pct}` interpolate live battery percentage
 
+The bulk timing flow applies the selected repeat behavior to every existing rule. Fixed mode replaces all per-rule repeat values with the selected count; Until stopped writes `0` to every rule. An unlimited bulk update does not change `REPEAT_COUNT`, because that variable remains the fixed-repeat default offered for newly added alerts.
+
 Invalid numeric fields and malformed rules are rejected or replaced by safe defaults. Duplicate level/type rules are normalized into one ordered combined message, preventing unreachable duplicate rules.
 
 ## Battery model
@@ -91,7 +93,7 @@ The monitor lock and configuration lock live under the owner-only `~/.battmon` d
 
 ## Interruptible speech
 
-Speech runs asynchronously. While `say` is active, the monitor polls battery and audio state at `CHECK_INTERVAL_MS` (default 200 ms). Pause polling uses the smaller of the configured pause and check interval, so a 50 ms pause stays interruptible without rounding to zero.
+Speech runs asynchronously. A dedicated child watches battery, adapter, and audio state at `CHECK_INTERVAL_MS` (default 200 ms) and reports a cutoff through an atomic file in a private runtime directory. The parent checks that file while `say` runs and during the pause, then stops speech and performs the usual audio/media cleanup. Its speech-completion polling interval is capped by the configured pause, so a 50 ms pause is not extended by the default 200 ms poll. Slow system-status commands run concurrently rather than being added to the gap between messages; exact audible timing remains subject to process scheduling and `say` startup.
 
 Cutoffs include:
 

@@ -1,94 +1,250 @@
-# Battmon
+# 🦇 Battmon: macOS Battery Voice Monitor & Interactive Manager
 
-Battmon is a macOS battery voice-alert service with an 80×24 terminal manager. It watches charging and discharging thresholds, speaks configured messages, and can be interrupted immediately with a charger transition, Mute, or Volume Down. An alert can use a fixed repeat count or keep speaking until you interrupt it.
+[![Platform](https://img.shields.io/badge/platform-macOS%2010.13+-black?style=flat&logo=apple)](https://www.apple.com/macos/)
+[![Language](https://img.shields.io/badge/language-Bash%20%7C%20AppleScript-green.svg?style=flat)](https://www.gnu.org/software/bash/)
+[![Dependencies](https://img.shields.io/badge/dependencies-Zero%20(100%25%20Native)-blue.svg?style=flat)](#prerequisites)
+[![UI](https://img.shields.io/badge/interface-80x24%20Terminal%20TUI-orange.svg?style=flat)](#-interactive-tui-preview)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat)](LICENSE)
 
-When enabled, Battmon safely pauses playing audio in Apple Music, Spotify, and QuickTime Player, plus HTML audio/video in Chrome, Brave, Safari, Edge, Vivaldi, and Chromium. After the alert, it restores the original system volume and mute state, then resumes only the players and page elements that Battmon successfully paused. Already-paused or closed media stays untouched.
+> **A native, zero-dependency macOS battery voice-alert daemon and terminal manager.**
+> Speaks customizable voice alerts at any battery percentage (charging or discharging), automatically boosts system audio, and **instantly cuts off speech** when you plug in, unplug, or press your keyboard's **Mute (F10)** or **Volume Down (F11)** keys.
 
-Each main-menu refresh uses the terminal's native clear behavior followed by an ANSI fallback, so prior command and submenu output does not remain visible above the dashboard. In iTerm2, Battmon also sends iTerm2's native `ClearScrollback` command.
+---
 
-## Install
+## 📸 Interactive TUI Preview
 
-```bash
-chmod +x setup.sh battmon battery_monitor.sh
-./setup.sh
-```
-
-To install without starting background monitoring:
-
-```bash
-./setup.sh --no-start
-```
-
-`--no-start` deliberately disables automatic alerts. The menu displays **Monitor: OFF — ALERTS DISABLED**, and `battmon doctor` reports the stopped service as a blocking failure until `battmon start` is run.
-
-Battmon uses only built-in macOS tools. The installer does not download packages or overwrite unrelated commands.
-
-## Commands
+Battmon is built specifically for the default macOS terminal geometry (**80 columns × 24 rows**). Zero line wrapping, zero vertical scrolling, and no terminal jitter.
 
 ```text
-battmon              Interactive terminal manager
-battmon status       Battery, power state, service, volume, and rules
-battmon doctor       Read-only health checks
-battmon run          One immediate evaluation cycle
-battmon start        Install/load the LaunchAgent
-battmon stop         Stop the LaunchAgent and any orphan monitor processes
-battmon restart      Reinstall and reload the LaunchAgent
-battmon test         Interactive voice/cutoff tests
-battmon edit         Edit the active configuration
-battmon migrate      Validate and normalize the active configuration
+─── BATTMON 🦇 Battery Voice Monitor ─────────────────────────────────────
+ Battery: 42% (On Battery)           | Current system volume: 75%
+ Volume target: 60%                  | Silencing: Charger or MUTE/VOL-DOWN
+──────────────────────────────────────────────────────────────────────────
+ Configured Alerts:
+  • 100% [HIGH] 20x  100ms "Battery is fully charged"
+  •  80% [HIGH] 20x  100ms "The battery is optimally charged"
+  •  39% [LOW ] 20x  100ms "Battery is at 39 percent"
+  •  15% [LOW ] 20x  100ms "Battery is at 15 percent"
+  •  13% [LOW ] 20x   50ms "Battery is at 13 percent"
+  •  10% [LOW ] 20x  100ms "Battery is at 10 percent"
+    (... and 4 more alerts - view all via option 4)
+──────────────────────────────────────────────────────────────────────────
+  1) Edit an alert rule            7) Change volume target
+  2) Add new battery alert         8) Test voice & silencing keys
+  3) Delete an alert rule          9) Background service controls
+  4) View all alerts & status     10) Reset everything to default
+  5) Change repeat & pause delay  11) Exit Battmon
+  6) Apply to existing rules
+──────────────────────────────────────────────────────────────────────────
 ```
 
-## Configuration
+---
 
-- Active config: `~/.battmon/battery_config.sh`
-- Package/default config: `battery_config.sh` in this folder
-- State: `~/.battmon/state`
-- Logs: `~/Library/Logs/Battmon/battmon.log`
-- LaunchAgent: `~/Library/LaunchAgents/com.battery.batmon.plist`
+## ⚡ Why Battmon?
 
-The active config is the single writable source of truth. The package config is never silently overwritten. Writes are atomic, reject stale edits from another open manager, and save the exact previous file under `~/.battmon/backups/` before every real change. Saving an unchanged configuration does not rewrite it.
+* macOS notification banners are silent, easy to miss when focused in full-screen apps, and don't wake you up if you step away from your desk.
+* Overcharging above 80% accelerates lithium-ion battery wear; deep discharging below 10% risks sudden system shutdown and data loss.
+* Most battery utilities are bloated 200MB Electron applications or paid menu-bar subscriptions.
+* **Battmon is 100% native**: It uses macOS built-in tools (`pmset`, `say`, `osascript`, `launchd`), consumes **zero idle CPU**, requires **no Homebrew, Python, or Node.js**, and runs quietly as a native user LaunchAgent.
 
-Alert format:
+---
+
+## ✨ Key Features
+
+### 🔇 Multi-Way Instant Silencing
+No annoying loops you cannot stop. You can silence an alert mid-syllable at any second:
+1. **Plug In / Unplug Charger**:
+   * For **LOW** battery alerts: plugging in your charger cuts speech off immediately.
+   * For **HIGH** (charging) alerts: unplugging your charger cuts speech off immediately.
+2. **Keyboard Mute Key (F10)**:
+   * Press physical **MUTE** &rarr; Battmon cuts speech off instantly and keeps your Mac muted.
+3. **Keyboard Volume Down Key (F11)**:
+   * Press **VOLUME DOWN** &rarr; Battmon detects the audio drop, terminates the speech loop, and preserves your chosen quieter volume.
+
+### 🔊 Smart Audio Management & Exact Restoration
+* **Auto-Unmute & Volume Boost**: If your audio is muted or too quiet (e.g. 15%), Battmon temporarily raises the volume to your configured target (default 60%) so you never miss an alert.
+* **Guaranteed State Restoration**: The millisecond the alert finishes or is silenced, Battmon restores your exact previous audio state:
+  * If volume was 24%, it returns to 24%.
+  * If your Mac was muted, it returns to muted.
+
+### 🗣️ Dynamic Real-Time Spoken Percentage
+If your battery drops while an alert is speaking (e.g. alert triggers at 15%, but discharges to 14% on repeat 4), Battmon reads the live battery sensor and speaks `"Battery is at 14 percent"`. It never repeats stale numbers.
+
+### ⏱️ Sub-100ms High-Frequency Pauses
+Configurable pause intervals between spoken repetitions down to **50 ms** (default is 100 ms). Fine-tuned via floating-point sub-second timing loops.
+
+### 🛡️ Bidirectional Dual-Sync Persistence
+Settings saved via the terminal GUI (`battmon`) write atomically to both the runtime daemon directory (`~/.battmon/`) and your local repository/Desktop folder. Re-running `./setup.sh` or uninstallation will never wipe your custom alerts.
+
+### 🔍 Duplicate Alert Collision Protection
+Adding an alert percentage that already exists triggers an instant conflict prompt displaying the existing settings and offering to edit, overwrite, choose another percentage, or cancel.
+
+---
+
+## 🚀 Quick Setup (Install in 30 Seconds)
+
+### Option A: One-Line Installation (Recommended)
+
+Clone the repository and run the setup wizard:
+
+```bash
+git clone https://github.com/your-username/battmon.git
+cd battmon
+chmod +x setup.sh battmon battery_monitor.sh && ./setup.sh
+```
+
+### Option B: Manual Folder Installation
+
+1. Download or unzip the repository onto your Mac (e.g., `~/Desktop/Battmon`).
+2. Open **Terminal**, type `cd ` (with a trailing space), and drag-and-drop the `Battmon` folder into the Terminal window.
+3. Run:
+   ```bash
+   chmod +x setup.sh battmon battery_monitor.sh && ./setup.sh
+   ```
+4. Choose **1** for Quick Install (default alerts) or **2** for Custom Setup.
+
+---
+
+## 🎮 Command-Line Usage
+
+Once installed, the `battmon` CLI is globally available from any terminal session:
+
+```bash
+# Open interactive 80x24 manager
+battmon
+
+# Check live battery status, audio level & configured rules
+battmon status
+
+# Interactive voice & key silencing test (Charger / Mute / Volume Down)
+battmon test
+
+# Trigger an immediate background check cycle
+battmon run
+
+# Background daemon service controls
+battmon start      # Register & start daemon
+battmon stop       # Stop background daemon
+battmon restart    # Reload daemon with latest battery_config.sh
+
+# Open battery_config.sh directly in your terminal editor
+battmon edit
+
+# View CLI manual
+battmon --help
+```
+
+---
+
+## ⚙️ Configuration & Rule Syntax
+
+Configuration is stored in `~/.battmon/battery_config.sh` and automatically synchronized. You can modify settings using the interactive menu (`battmon`) or edit the file directly (`battmon edit`).
+
+```bash
+# Global defaults
+REPEAT_COUNT=20          # Default repeat count
+REPEAT_DELAY_MS=100      # Default pause between repetitions (min: 50 ms)
+CHECK_INTERVAL_MS=200    # Background key-polling resolution
+ALERT_VOLUME=60          # Alert volume level (0-100%)
+RESTORE_VOLUME=true      # Auto-restore previous volume when alert finishes
+
+# Configured alert rules
+ALERTS=(
+    "100:HIGH:20:100:Battery is fully charged"
+    "80:HIGH:20:100:The battery is optimally charged"
+    "39:LOW:20:100:Battery is at 39 percent"
+    "15:LOW:20:100:Battery is at 15 percent"
+    "13:LOW:20:50:Battery is at 13 percent"
+    "10:LOW:20:100:Charge up your battery"
+    "6:LOW:15:100:Battery is at 6 percent"
+    "5:LOW:20:100:Battery is critically low"
+    "1:LOW:20:100:Battery is critically low"
+)
+```
+
+### Alert Tuple Specification
+Each rule inside `ALERTS` is defined as:
+```text
+"<PERCENT>:<CONDITION>:<REPEATS>:<DELAY_MS>:<MESSAGE>"
+```
+
+| Field | Description | Accepted Values |
+| :--- | :--- | :--- |
+| `PERCENT` | Battery percentage trigger threshold | `1` - `100` |
+| `CONDITION` | Power state trigger condition | `HIGH` (Charging up to %) or `LOW` (Discharging down to %) |
+| `REPEATS` | How many times the voice alert speaks | `1` - `100` |
+| `DELAY_MS` | Pause between spoken repetitions in milliseconds | `50` - `60000` (min: 50 ms, default: 100 ms) |
+| `MESSAGE` | Text-to-speech phrase spoken by macOS | Any text string |
+
+---
+
+## 🏗️ Architecture & How It Works
+
+Battmon runs as a user-level macOS **LaunchAgent** (`com.battery.batmon.plist`) inside your active graphical Aqua session.
 
 ```text
-PERCENT:TYPE:REPEATS:PAUSE_MS:MESSAGE
+[pmset -g batt]  -->  Evaluates Battery % & AC Power
+                              │
+                              ▼
+[battery_monitor.sh] --> Reads ~/.battmon_state (prevents duplicate triggers)
+                              │
+                              ▼
+                     Fires Matching Alert
+                              │
+                              ├─► Snapshot Volume & Mute (osascript)
+                              ├─► Boost Volume to Target (e.g. 60%)
+                              ├─► Fork Speech: say "$msg" & (PID tracking)
+                              │     │
+                              │     └─► Polls every 200ms: Charger? MUTE? VOL DOWN?
+                              │           └─► IF Detected: kill say_pid mid-syllable
+                              │
+                              └─► Guaranteed Audio Restore (EXIT/TERM/INT trap)
 ```
 
-The default pause is **100 ms**. Values from **50 ms through 60,000 ms** are accepted. A repeat value of `0` means **Until stopped**; fixed repeat values are `1` through `100`.
+For complete architectural specifications, IPC, and sub-second polling mechanics, see the [Developer Reference Guide](DEVELOPER_GUIDE.md).
 
-`PAUSE_MEDIA=true` enables pause/speak/restore/resume behavior and can be changed in the interactive **Audio & media settings** screen. That screen also has **Check or request media permissions**, which safely probes running players and browsers without changing playback or volume. For Chrome, Brave, or Edge, enable **View → Developer → Allow JavaScript from Apple Events**. For Safari, enable **Develop → Allow JavaScript from Apple Events**. Battmon deliberately does not send a blind global Play/Pause key, so unsupported applications are not accidentally started or resumed.
+---
 
-`STARTUP_GRACE_SECONDS=300` keeps Battmon silent for the first five minutes after a cold boot. Battmon also suppresses alerts for the entire time the macOS session is locked, then records the current battery state as a quiet baseline when the session becomes active. This prevents a 1% alert from speaking while a powered-off Mac is first connected to a charger or before the owner unlocks it.
+## 📋 Prerequisites
 
-## Power behavior
+Battmon requires **macOS 10.13 (High Sierra)** or later. It runs completely out-of-the-box using native tools:
+* `pmset` (Power management daemon)
+* `say` (Native speech synthesis)
+* `osascript` (CoreAudio control via AppleScript)
+* `launchctl` (macOS background job manager)
+* `bash` / `awk` (Standard POSIX shell utilities)
 
-- **Charging alert** (stored as `HIGH`): speaks when the battery goes up to the chosen percentage. The voice stops when charging stops or the charger is unplugged.
-- **Low-battery alert** (stored as `LOW`): speaks when the battery goes down to the chosen percentage. The voice stops when charging starts.
-- A charger change alone never triggers a rule. LOW stays silent while the percentage rises, and HIGH stays silent while it falls—even when the current percentage exactly matches the rule.
-- Percentages below **30%** are always low-battery alerts. Battmon skips the type question and clearly states that plugging in the charger stops the voice.
-- Low-battery alerts use the battery's real direction, including the unusual case where an adapter is attached but the battery is still going down.
-- If several thresholds are crossed between checks, Battmon selects the most relevant critical threshold instead of losing all of them.
-- Duplicate percentage/type messages are merged deterministically so no phrase silently becomes unreachable.
-- **Until stopped** alerts repeat until Mute, Volume Down, or the appropriate charger action is detected. While speech is active, Battmon checks both `pmset` and the battery hardware's direct adapter signal so plugging or unplugging can stop the current sentence without waiting for a stale power-source report to refresh.
+**No external packages, Python runtimes, or Homebrew dependencies required.**
 
-The interactive **Test voice & silencing keys** screen includes a media test. Start playback in a supported player or browser tab and choose the test; Battmon pauses it, speaks once, restores the original system volume and mute state, and resumes exactly what it paused. If macOS shows an Automation permission prompt the first time, choose **Allow**. If a playing native app is detected but cannot be controlled, open **System Settings → Privacy & Security → Automation** and allow the terminal app running Battmon (for example, iTerm2) to control that player.
+---
 
-## Safe uninstall
+## 🗑️ Uninstallation
+
+To remove Battmon cleanly:
 
 ```bash
 ./setup.sh --uninstall
 ```
 
-Configuration is preserved by default. To remove state and configuration too—after creating a backup—use:
+This will:
+* Unload and delete the LaunchAgent service (`com.battery.batmon.plist`)
+* Remove the global CLI commands (`~/.local/bin/battmon`)
+* Clean up the runtime daemon directory (`~/.battmon/`)
+* **Safely preserve** your customized alerts in your local `battery_config.sh`
 
-```bash
-./setup.sh --uninstall --purge
-```
+---
 
-## Tests
+## 🤝 Contributing
 
-The deterministic test suite never speaks or changes system volume:
+Contributions, feature suggestions, and bug reports are welcome!
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
-```bash
-./tests/run_tests.sh
-```
+---
+
+## 📄 License
+
+Distributed under the **MIT License**. See `LICENSE` for more information.

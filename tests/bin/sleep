@@ -1,2 +1,3 @@
 #!/bin/bash
+[ "${TEST_REAL_SLEEP:-0}" = "1" ] && exec /bin/sleep "$@"
 exit 0

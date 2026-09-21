@@ -12,6 +12,8 @@ fi
 source "$COMMON_FILE" || exit 2
 
 SAY_PID=""
+ALERT_WATCH_PID=""
+ALERT_WATCH_DIR=""
 LOCK_HELD=0
 AUDIO_MODIFIED=0
 ORIG_VOL=""
@@ -303,8 +305,22 @@ stop_speech() {
     SAY_PID=""
 }
 
+stop_alert_watch() {
+    if [ -n "$ALERT_WATCH_PID" ]; then
+        kill -TERM "$ALERT_WATCH_PID" 2>/dev/null || true
+        wait "$ALERT_WATCH_PID" 2>/dev/null || true
+        ALERT_WATCH_PID=""
+    fi
+    if [ -n "$ALERT_WATCH_DIR" ]; then
+        rm -f "$ALERT_WATCH_DIR/cutoff" "$ALERT_WATCH_DIR/cutoff.tmp" 2>/dev/null || true
+        rmdir "$ALERT_WATCH_DIR" 2>/dev/null || true
+        ALERT_WATCH_DIR=""
+    fi
+}
+
 cleanup() {
     stop_speech
+    stop_alert_watch
     if [ "$USER_SILENCED" -eq 0 ] || [ "$MEDIA_WAS_PLAYING" -eq 1 ]; then
         restore_audio
     fi
@@ -570,16 +586,42 @@ poll_for_interrupt() {
     check_user_silenced_audio
 }
 
+watch_alert_interrupts() {
+    local type="$1" start_source="$2" check_seconds="$3"
+    # This worker only reports a cutoff; the main process owns speech and audio cleanup.
+    trap - EXIT INT TERM HUP
+    while true; do
+        if poll_for_interrupt "$type" "$start_source"; then
+            printf '%s|%s\n' "$INTERRUPT_REASON" "$USER_SILENCED" > "$ALERT_WATCH_DIR/cutoff.tmp"
+            mv -f "$ALERT_WATCH_DIR/cutoff.tmp" "$ALERT_WATCH_DIR/cutoff"
+            return 0
+        fi
+        /bin/sleep "$check_seconds"
+    done
+}
+
+alert_watch_cutoff() {
+    [ -n "$ALERT_WATCH_DIR" ] && [ -f "$ALERT_WATCH_DIR/cutoff" ] || return 1
+    IFS='|' read -r INTERRUPT_REASON USER_SILENCED < "$ALERT_WATCH_DIR/cutoff"
+    return 0
+}
+
 speak_rule() {
     local message="$1" type="$2" repeat_count="$3" delay_ms="$4" rule_level="$5"
     local start_source="$BATTERY_SOURCE"
-    local poll_ms poll_seconds repetition pause_elapsed pause_step pause_seconds spoken_message
+    local poll_ms poll_seconds check_seconds repetition pause_elapsed pause_step pause_seconds spoken_message
 
     poll_ms="$CHECK_INTERVAL_MS"
+    # A short requested pause must not inherit a longer speech-completion poll.
+    [ "$poll_ms" -gt "$delay_ms" ] && poll_ms="$delay_ms"
     poll_seconds=$(awk -v ms="$poll_ms" 'BEGIN { printf "%.3f", ms / 1000 }')
+    check_seconds=$(awk -v ms="$CHECK_INTERVAL_MS" 'BEGIN { printf "%.3f", ms / 1000 }')
 
     pause_active_media
     prepare_audio
+    ALERT_WATCH_DIR=$(mktemp -d "$BATTMON_RUNTIME_DIR/.alert-watch.XXXXXX") || return 1
+    watch_alert_interrupts "$type" "$start_source" "$check_seconds" &
+    ALERT_WATCH_PID=$!
     if [ "$repeat_count" -eq 0 ]; then
         log_event "[Alert Started] Rule ${rule_level}% ${type}; until interrupted; ${delay_ms}ms pause"
     else
@@ -592,7 +634,11 @@ speak_rule() {
             log_event "[Alert Cutoff] $INTERRUPT_REASON before repetition $repetition"
             return 2
         fi
-        if check_user_silenced_audio; then
+        if [ "$repetition" -eq 1 ] && check_user_silenced_audio; then
+            log_event "[Alert Cutoff] $INTERRUPT_REASON before repetition $repetition"
+            return 2
+        fi
+        if alert_watch_cutoff; then
             log_event "[Alert Cutoff] $INTERRUPT_REASON before repetition $repetition"
             return 2
         fi
@@ -607,7 +653,7 @@ speak_rule() {
         SAY_PID=$!
 
         while kill -0 "$SAY_PID" 2>/dev/null; do
-            if poll_for_interrupt "$type" "$start_source"; then
+            if alert_watch_cutoff; then
                 log_event "[Alert Cutoff] $INTERRUPT_REASON during repetition $repetition"
                 stop_speech
                 return 2
@@ -616,11 +662,15 @@ speak_rule() {
         done
         wait "$SAY_PID" 2>/dev/null || true
         SAY_PID=""
+        if alert_watch_cutoff; then
+            log_event "[Alert Cutoff] $INTERRUPT_REASON after repetition $repetition"
+            return 2
+        fi
 
         pause_elapsed=0
         while [ "$pause_elapsed" -lt "$delay_ms" ] && \
             { [ "$repeat_count" -eq 0 ] || [ "$repetition" -lt "$repeat_count" ]; }; do
-            if poll_for_interrupt "$type" "$start_source"; then
+            if alert_watch_cutoff; then
                 log_event "[Alert Cutoff] $INTERRUPT_REASON after repetition $repetition"
                 return 2
             fi
@@ -1004,6 +1054,7 @@ main() {
     }
     speak_rule "$PARSED_MSG" "$PARSED_TYP" "$PARSED_REP" "$PARSED_DEL" "$PARSED_LVL"
     speech_result=$?
+    stop_alert_watch
     # Charger, power-mode, mute, and volume-key cutoffs are expected outcomes.
     [ "$speech_result" -eq 2 ] && return 0
     return "$speech_result"

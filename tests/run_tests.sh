@@ -45,7 +45,7 @@ write_config() {
     {
         printf 'REPEAT_COUNT=1\n'
         printf 'REPEAT_DELAY_MS=100\n'
-        printf 'CHECK_INTERVAL_MS=50\n'
+        printf 'CHECK_INTERVAL_MS=%s\n' "${TEST_CHECK_INTERVAL_MS:-50}"
         printf 'STARTUP_GRACE_SECONDS=300\n'
         printf 'ALERT_VOLUME=60\n'
         printf 'RESTORE_VOLUME=true\n'
@@ -80,6 +80,9 @@ run_monitor() {
         BATTMON_LOG_DIR="$CASE_HOME/logs" \
         BATTMON_LOG_FILE="$CASE_HOME/logs/battmon.log" \
         TEST_SAY_LOG="$SAY_LOG" \
+        TEST_SAY_TIMING_LOG="${TEST_SAY_TIMING_LOG:-}" \
+        TEST_SAY_DURATION_SECONDS="${TEST_SAY_DURATION_SECONDS:-}" \
+        TEST_REAL_SLEEP="${TEST_REAL_SLEEP:-0}" \
         TEST_EVENT_LOG="$EVENT_LOG" \
         TEST_POWER_SOURCE="${TEST_POWER_SOURCE:-Battery}" \
         TEST_BATTERY_PERCENT="${TEST_BATTERY_PERCENT:-50}" \
@@ -103,6 +106,7 @@ run_monitor() {
         TEST_CHARGER_FLAG="${TEST_CHARGER_FLAG:-$CASE_HOME/charger-connected.flag}" \
         TEST_UNPLUG_FLAG="${TEST_UNPLUG_FLAG:-$CASE_HOME/charger-disconnected.flag}" \
         TEST_CONNECT_CHARGER_DURING_SAY="${TEST_CONNECT_CHARGER_DURING_SAY:-0}" \
+        TEST_CONNECT_CHARGER_AFTER_SAY="${TEST_CONNECT_CHARGER_AFTER_SAY:-0}" \
         TEST_DISCONNECT_CHARGER_DURING_SAY="${TEST_DISCONNECT_CHARGER_DURING_SAY:-0}" \
         TEST_SYSTEM_UPTIME_SECONDS="${TEST_SYSTEM_UPTIME_SECONDS:-86400}" \
         TEST_CHROME_MEDIA_COUNT="${TEST_CHROME_MEDIA_COUNT:-0}" \
@@ -388,13 +392,41 @@ else
     fail "unlimited repeat mode survives config normalization and save"
 fi
 
+# The requested pause should not inherit a much larger speech-poll interval.
+# Use a short fake utterance and real test sleeps; no system audio is played.
+new_case
+TEST_CHECK_INTERVAL_MS=800 write_config "$CASE_HOME/.battmon/battery_config.sh" \
+    "50:LOW:2:50:timed alert"
+write_state "$CASE_HOME/.battmon/state" 51 "" "" discharging BATTERY
+TEST_SAY_TIMING_LOG="$CASE_HOME/say-timing.log" TEST_SAY_DURATION_SECONDS=0.05 \
+    TEST_REAL_SLEEP=1 TEST_POWER_SOURCE=Battery TEST_BATTERY_PERCENT=50 \
+    TEST_BATTERY_MODE=discharging run_monitor
+repeat_gap_ms=$(/usr/bin/perl -ne '
+    if (/^end ([0-9.]+)/ && !defined $end) { $end = $1 }
+    elsif (/^start ([0-9.]+)/ && defined $end) {
+        printf "%.0f", ($1 - $end) * 1000;
+        exit
+    }
+' "$CASE_HOME/say-timing.log")
+if [ -n "$repeat_gap_ms" ] && [ "$repeat_gap_ms" -lt 600 ]; then
+    pass "50 ms repeat pause does not wait for an 800 ms speech poll (${repeat_gap_ms} ms measured)"
+else
+    fail "50 ms repeat pause does not wait for an 800 ms speech poll (${repeat_gap_ms:-unknown} ms measured)"
+fi
+if compgen -G "$CASE_HOME/.battmon/.alert-watch.*" >/dev/null; then
+    fail "alert watcher runtime files are cleaned up"
+else
+    pass "alert watcher runtime files are cleaned up"
+fi
+
 # Unlimited speech stops on a user volume change, restores audio, then resumes
 # only the media player Battmon actually paused.
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" "50:LOW:0:50:interrupt me"
 write_state "$CASE_HOME/.battmon/state" 51 "" "" discharging BATTERY
 TEST_RUNNING_MEDIA_APPS=Spotify TEST_SPOTIFY_STATE=playing \
-    TEST_INTERRUPT_AFTER_SAYS=3 TEST_POWER_SOURCE=Battery \
+    TEST_INTERRUPT_AFTER_SAYS=3 TEST_SAY_DURATION_SECONDS=0.2 TEST_REAL_SLEEP=1 \
+    TEST_POWER_SOURCE=Battery \
     TEST_BATTERY_PERCENT=50 TEST_BATTERY_MODE=discharging run_monitor
 event_sequence=$(tr '\n' '|' < "$EVENT_LOG")
 if [ "$(wc -l < "$SAY_LOG" | tr -d ' ')" = "3" ] && \
@@ -417,6 +449,20 @@ if [ "$(wc -l < "$SAY_LOG" | tr -d ' ')" = "1" ] && \
     pass "LOW alert stops mid-sentence from the direct adapter signal"
 else
     fail "LOW alert stops mid-sentence from the direct adapter signal"
+fi
+
+# A charger transition after one sentence must prevent the next repetition.
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "5:LOW:2:1000:stop between repeats"
+write_state "$CASE_HOME/.battmon/state" 6 "" "" discharging BATTERY
+TEST_CONNECT_CHARGER_AFTER_SAY=1 TEST_REAL_SLEEP=1 TEST_POWER_SOURCE=Battery \
+    TEST_BATTERY_PERCENT=5 TEST_BATTERY_MODE=discharging run_monitor
+if [ "$(wc -l < "$SAY_LOG" | tr -d ' ')" = "1" ] && \
+    grep -q '\[Alert Cutoff\] charger connected after repetition 1' \
+    "$CASE_HOME/logs/battmon.log"; then
+    pass "LOW alert stops between repetitions when charger connects"
+else
+    fail "LOW alert stops between repetitions when charger connects"
 fi
 
 # The same direct signal must stop a HIGH alert as soon as the adapter leaves.
@@ -724,16 +770,49 @@ fi
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" \
     "20:LOW:0:100:unlimited" "10:LOW:1:100:fixed"
-timing_output=$(printf '6\n\n200\ny\n\n11\n' | env HOME="$CASE_HOME" \
+timing_output=$(printf '6\n1\n\n200\ny\n\n11\n' | env HOME="$CASE_HOME" \
     PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
     TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
     TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" 2>&1)
-if env HOME="$CASE_HOME" /bin/bash -c 'source "$1"; [[ "${ALERTS[*]}" == *"20:LOW:0:200:unlimited"* ]] && [[ "${ALERTS[*]}" == *"10:LOW:1:200:fixed"* ]]' _ \
+if env HOME="$CASE_HOME" /bin/bash -c 'source "$1"; [[ "${ALERTS[*]}" == *"20:LOW:1:200:unlimited"* ]] && [[ "${ALERTS[*]}" == *"10:LOW:1:200:fixed"* ]]' _ \
     "$CASE_HOME/.battmon/battery_config.sh" && \
-    [[ "$timing_output" == *"Rules set to Until stopped stayed unlimited."* ]]; then
-    pass "batch timing keeps unlimited rules unlimited"
+    [[ "$timing_output" == *"Repeat behavior for all existing alerts:"* ]] && \
+    [[ "$timing_output" == *"Updated all 2 existing rules: 1 time, 200 ms pause."* ]]; then
+    pass "batch fixed timing updates every existing rule"
 else
-    fail "batch timing keeps unlimited rules unlimited"
+    fail "batch fixed timing updates every existing rule"
+fi
+
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" \
+    "20:LOW:3:100:twenty" "10:LOW:1:100:ten"
+unlimited_timing_output=$(printf '6\n2\n50\ny\n\n11\n' | env HOME="$CASE_HOME" \
+    PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
+    TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
+    TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" 2>&1)
+if env HOME="$CASE_HOME" /bin/bash -c 'source "$1"; [[ "${ALERTS[*]}" == *"20:LOW:0:50:twenty"* ]] && [[ "${ALERTS[*]}" == *"10:LOW:0:50:ten"* ]] && [ "$REPEAT_COUNT" = 1 ]' _ \
+    "$CASE_HOME/.battmon/battery_config.sh" && \
+    [[ "$unlimited_timing_output" == *"2) Until stopped — keep every alert speaking until you stop it"* ]] && \
+    [[ "$unlimited_timing_output" == *"Updated all 2 existing rules: Until stopped, 50 ms pause."* ]]; then
+    pass "batch timing can make every existing rule unlimited"
+else
+    fail "batch timing can make every existing rule unlimited"
+fi
+
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" \
+    "20:LOW:3:100:twenty" "10:LOW:1:100:ten"
+default_timing_output=$(printf '5\n\n50\ny\n2\ny\n\n11\n' | env HOME="$CASE_HOME" \
+    PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
+    TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
+    TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" 2>&1)
+if env HOME="$CASE_HOME" /bin/bash -c 'source "$1"; [[ "${ALERTS[*]}" == *"20:LOW:0:50:twenty"* ]] && [[ "${ALERTS[*]}" == *"10:LOW:0:50:ten"* ]]' _ \
+    "$CASE_HOME/.battmon/battery_config.sh" && \
+    [[ "$default_timing_output" == *"Repeat behavior for all existing alerts:"* ]] && \
+    [[ "$default_timing_output" == *"Updated all 2 existing rules: Until stopped, 50 ms pause."* ]]; then
+    pass "default timing flow can make every existing rule unlimited"
+else
+    fail "default timing flow can make every existing rule unlimited"
 fi
 
 # Audio settings expose and persist the media pause/resume switch.
