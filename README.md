@@ -88,7 +88,7 @@ Adding an alert percentage that already exists triggers an instant conflict prom
 Clone the repository and run the setup wizard:
 
 ```bash
-git clone https://github.com/your-username/battmon.git
+git clone https://github.com/mufasa-debug/battmon.git
 cd battmon
 chmod +x setup.sh battmon battery_monitor.sh && ./setup.sh
 ```
