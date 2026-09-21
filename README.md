@@ -46,7 +46,7 @@ battmon migrate      Validate and normalize the active configuration
 - Logs: `~/Library/Logs/Battmon/battmon.log`
 - LaunchAgent: `~/Library/LaunchAgents/com.battery.batmon.plist`
 
-The active config is the single writable source of truth. The package config is never silently overwritten. Writes are atomic and reject stale edits from another open manager.
+The active config is the single writable source of truth. The package config is never silently overwritten. Writes are atomic, reject stale edits from another open manager, and save the exact previous file under `~/.battmon/backups/` before every real change. Saving an unchanged configuration does not rewrite it.
 
 Alert format:
 

@@ -1162,7 +1162,7 @@ doctor() {
         echo " [FAIL] Battmon requires macOS"
         failures=$((failures + 1))
     fi
-    for command_name in pmset say launchctl osascript pgrep ps ioreg sysctl awk sed sort mktemp plutil; do
+    for command_name in pmset say launchctl osascript pgrep ps ioreg sysctl awk sed sort mktemp cmp plutil; do
         if command -v "$command_name" >/dev/null 2>&1; then
             printf ' [OK] %s\n' "$command_name"
         else

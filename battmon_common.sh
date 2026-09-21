@@ -253,6 +253,22 @@ release_config_lock() {
     rmdir "$BATTMON_CONFIG_LOCK" 2>/dev/null || true
 }
 
+backup_active_config() {
+    [ -f "$BATTMON_CONFIG_FILE" ] || return 0
+    local backup_dir="$BATTMON_RUNTIME_DIR/backups" backup_path
+    mkdir -p "$backup_dir" || return 1
+    chmod 700 "$backup_dir" 2>/dev/null || true
+    backup_path=$(mktemp "$backup_dir/battery_config.sh.XXXXXX") || return 1
+    if ! cp "$BATTMON_CONFIG_FILE" "$backup_path"; then
+        rm -f "$backup_path"
+        return 1
+    fi
+    chmod 600 "$backup_path" || {
+        rm -f "$backup_path"
+        return 1
+    }
+}
+
 acquire_config_lock() {
     ensure_runtime_dirs || return 1
     if mkdir "$BATTMON_CONFIG_LOCK" 2>/dev/null; then
@@ -324,6 +340,24 @@ save_config() {
         release_config_lock
         return 1
     }
+
+    # Avoid needless inode replacement and preserve the exact previous file
+    # before every real change. This gives manual recovery even if a separate
+    # manager or interrupted workflow writes an unwanted but valid config.
+    if [ -f "$BATTMON_CONFIG_FILE" ] && cmp -s "$temp_file" "$BATTMON_CONFIG_FILE"; then
+        rm -f "$temp_file"
+        CONFIG_LOADED_PATH="$BATTMON_CONFIG_FILE"
+        CONFIG_LOADED_SIGNATURE=$(config_signature "$BATTMON_CONFIG_FILE")
+        release_config_lock
+        printf 'Settings already up to date.\n'
+        return 0
+    fi
+    if ! backup_active_config; then
+        printf 'Battmon: could not back up the current settings; no changes were written.\n' >&2
+        rm -f "$temp_file"
+        release_config_lock
+        return 1
+    fi
     if ! mv -f "$temp_file" "$BATTMON_CONFIG_FILE"; then
         rm -f "$temp_file"
         release_config_lock

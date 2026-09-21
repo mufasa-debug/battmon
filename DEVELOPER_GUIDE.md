@@ -33,7 +33,7 @@ flowchart TD
 
 `~/.battmon/battery_config.sh` is the only writable source of truth. The Desktop/package copy is a seed for a first install and is never silently synchronized back from the active config.
 
-The manager records a checksum when loading the config. Before saving, it takes a lock and compares the current checksum with the loaded checksum. If another manager wrote a newer version, the stale save is rejected. Writes use a temporary file in the runtime directory followed by an atomic rename.
+The manager records a checksum when loading the config. Before saving, it takes a lock and compares the current checksum with the loaded checksum. If another manager wrote a newer version, the stale save is rejected. Writes use a temporary file in the runtime directory followed by an atomic rename. Before a changed file is replaced, its exact prior contents are copied to `~/.battmon/backups/`; byte-identical saves are treated as no-ops and do not replace the inode.
 
 Generated alert values use Bash `%q` escaping, so quotes, command substitutions, backticks, spaces, and backslashes remain literal message text.
 

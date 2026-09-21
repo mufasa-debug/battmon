@@ -515,6 +515,25 @@ else
     fail "stale manager cannot overwrite a newer config"
 fi
 
+# Every changed save is recoverable; an identical save is a no-op.
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "10:LOW:1:100:original"
+save_output=$(env HOME="$CASE_HOME" BATTMON_RUNTIME_DIR="$CASE_HOME/.battmon" \
+    BATTMON_CONFIG_FILE="$CASE_HOME/.battmon/battery_config.sh" \
+    /bin/bash -c 'source "$1"; load_config || exit; REPEAT_COUNT=2; save_config || exit; load_config || exit; save_config' _ \
+    "$ROOT_DIR/battmon_common.sh" 2>&1)
+backup_count=$(find "$CASE_HOME/.battmon/backups" -type f -name 'battery_config.sh.*' 2>/dev/null | wc -l | tr -d ' ')
+backup_repeat=$(env HOME="$CASE_HOME" /bin/bash -c 'source "$1"; printf "%s" "$REPEAT_COUNT"' _ \
+    "$CASE_HOME/.battmon/backups/$(ls "$CASE_HOME/.battmon/backups")")
+current_repeat=$(env HOME="$CASE_HOME" /bin/bash -c 'source "$1"; printf "%s" "$REPEAT_COUNT"' _ \
+    "$CASE_HOME/.battmon/battery_config.sh")
+if [ "$backup_count" = "1" ] && [ "$backup_repeat" = "1" ] && [ "$current_repeat" = "2" ] && \
+    [[ "$save_output" == *"Settings already up to date."* ]]; then
+    pass "changed config saves are backed up and identical saves do not rewrite"
+else
+    fail "changed config saves are backed up and identical saves do not rewrite"
+fi
+
 # Read-only commands do not create runtime state.
 new_case
 rmdir "$CASE_HOME/.battmon"
@@ -818,7 +837,8 @@ fi
 if env HOME="$CASE_HOME" PATH="$TEST_BIN:$ORIGINAL_PATH" "$ROOT_DIR/setup.sh" --no-start >/dev/null && \
     env HOME="$CASE_HOME" PATH="$TEST_BIN:$ORIGINAL_PATH" "$ROOT_DIR/setup.sh" --no-start >/dev/null; then
     backup_files=("$CASE_HOME/.battmon/backups"/battery_config.sh.*)
-    if [ "${#backup_files[@]}" -eq 2 ] && [ -f "${backup_files[0]}" ] && [ -f "${backup_files[1]}" ]; then
+    if [ "${#backup_files[@]}" -ge 3 ] && [ -f "${backup_files[0]}" ] && \
+        [ -f "${backup_files[1]}" ] && [ -f "${backup_files[2]}" ]; then
         pass "reinstallation creates unique config backups"
     else
         fail "reinstallation creates unique config backups"

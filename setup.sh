@@ -192,7 +192,7 @@ preflight() {
         return 1
     fi
     local command_name missing=0
-    for command_name in pmset say launchctl osascript pgrep ps ioreg sysctl awk sed sort mktemp plutil; do
+    for command_name in pmset say launchctl osascript pgrep ps ioreg sysctl awk sed sort mktemp cmp plutil; do
         if ! command -v "$command_name" >/dev/null 2>&1; then
             printf 'Missing required macOS command: %s\n' "$command_name" >&2
             missing=1
