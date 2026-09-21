@@ -205,6 +205,59 @@ else
     fail "LOW alert is suppressed while charging"
 fi
 
+# Thresholds only fire while moving in their configured direction.
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "34:LOW:1:100:low thirty four"
+write_state "$CASE_HOME/.battmon/state" 33 "" "" charging AC
+TEST_POWER_SOURCE=AC TEST_BATTERY_PERCENT=34 TEST_BATTERY_MODE=charging run_monitor
+if [ ! -s "$SAY_LOG" ]; then
+    pass "LOW exact threshold stays silent while charging upward"
+else
+    fail "LOW exact threshold stays silent while charging upward"
+fi
+
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "34:LOW:1:100:low thirty four"
+write_state "$CASE_HOME/.battmon/state" 25 "" "" charging AC
+TEST_POWER_SOURCE=Battery TEST_BATTERY_PERCENT=25 TEST_BATTERY_MODE=discharging run_monitor
+if [ ! -s "$SAY_LOG" ]; then
+    pass "unplugging below a LOW threshold does not create a false alert"
+else
+    fail "unplugging below a LOW threshold does not create a false alert"
+fi
+
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "34:LOW:1:100:low thirty four"
+write_state "$CASE_HOME/.battmon/state" 36 "" "" discharging BATTERY
+TEST_POWER_SOURCE=Battery TEST_BATTERY_PERCENT=33 TEST_BATTERY_MODE=discharging run_monitor
+assert_true "LOW rule fires when discharge skips downward across its threshold" grep -q '^low thirty four$' "$SAY_LOG"
+
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "80:HIGH:1:100:high eighty"
+write_state "$CASE_HOME/.battmon/state" 81 "" "" discharging BATTERY
+TEST_POWER_SOURCE=Battery TEST_BATTERY_PERCENT=80 TEST_BATTERY_MODE=discharging run_monitor
+if [ ! -s "$SAY_LOG" ]; then
+    pass "HIGH exact threshold stays silent while discharging downward"
+else
+    fail "HIGH exact threshold stays silent while discharging downward"
+fi
+
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "80:HIGH:1:100:high eighty"
+write_state "$CASE_HOME/.battmon/state" 85 "" "" discharging BATTERY
+TEST_POWER_SOURCE=AC TEST_BATTERY_PERCENT=85 TEST_BATTERY_MODE=charging run_monitor
+if [ ! -s "$SAY_LOG" ]; then
+    pass "plugging in above a HIGH threshold does not create a false alert"
+else
+    fail "plugging in above a HIGH threshold does not create a false alert"
+fi
+
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "80:HIGH:1:100:high eighty"
+write_state "$CASE_HOME/.battmon/state" 78 "" "" charging AC
+TEST_POWER_SOURCE=AC TEST_BATTERY_PERCENT=82 TEST_BATTERY_MODE=charging run_monitor
+assert_true "HIGH rule fires when charging skips upward across its threshold" grep -q '^high eighty$' "$SAY_LOG"
+
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" "0:LOW:1:100:invalid rule"
 TEST_POWER_SOURCE=Battery TEST_BATTERY_PERCENT=10 TEST_BATTERY_MODE=discharging run_monitor >/dev/null 2>&1
@@ -490,6 +543,16 @@ else
     fail "stop command removes a stale monitor lock"
 fi
 
+# Orphan discovery is path-exact and does not depend on a surviving lock.
+orphan_pid_output=$(env PATH="$TEST_BIN:$ORIGINAL_PATH" \
+    BATTMON_RUNTIME_DIR="$CASE_HOME/.battmon" TEST_PS_FAKE_MONITORS=1 \
+    /bin/bash -c 'source "$1"; list_managed_monitor_pids' _ "$ROOT_DIR/battmon_common.sh")
+if [ "$orphan_pid_output" = $'123\n124\n126' ]; then
+    pass "orphan monitor discovery works without a lock and ignores unrelated paths"
+else
+    fail "orphan monitor discovery works without a lock and ignores unrelated paths"
+fi
+
 # Every main-menu render clears both the visible display and scrollback.
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" "10:LOW:1:100:ten percent"
@@ -526,6 +589,11 @@ if [ "$iterm_clear_count" -eq 2 ]; then
     pass "iTerm2 receives its native clear-scrollback command on every render"
 else
     fail "iTerm2 receives its native clear-scrollback command on every render"
+fi
+if [[ "$menu_output" == *"Monitor: OFF - ALERTS DISABLED"* ]]; then
+    pass "main menu makes disabled automatic alerts unmistakable"
+else
+    fail "main menu makes disabled automatic alerts unmistakable"
 fi
 
 # Trigger choices use plain language and state exactly when speech stops.
@@ -586,10 +654,23 @@ status_output=$(env HOME="$CASE_HOME" PATH="$TEST_BIN:$ORIGINAL_PATH" \
     TEST_POWER_SOURCE=Battery TEST_BATTERY_PERCENT=50 TEST_BATTERY_MODE=discharging \
     TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" status 2>&1)
 if [[ "$status_output" == *"CHARGING"* ]] && [[ "$status_output" == *"LOW-BATT"* ]] && \
-    [[ "$status_output" != *"  HIGH  "* ]]; then
+    [[ "$status_output" != *"  HIGH  "* ]] && \
+    [[ "$status_output" == *"STOPPED — automatic alerts are disabled"* ]]; then
     pass "status hides internal HIGH/LOW jargon where plain labels fit"
 else
     fail "status hides internal HIGH/LOW jargon where plain labels fit"
+fi
+
+doctor_output=""
+if doctor_output=$(env HOME="$CASE_HOME" PATH="$TEST_BIN:$ORIGINAL_PATH" \
+    TEST_POWER_SOURCE=Battery TEST_BATTERY_PERCENT=50 TEST_BATTERY_MODE=discharging \
+    TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" doctor 2>&1); then
+    fail "doctor treats disabled automatic alerts as a blocking failure"
+elif [[ "$doctor_output" == *"Background service stopped — automatic alerts cannot run"* ]] && \
+    [[ "$doctor_output" == *"1 blocking error(s)"* ]]; then
+    pass "doctor treats disabled automatic alerts as a blocking failure"
+else
+    fail "doctor treats disabled automatic alerts as a blocking failure"
 fi
 
 # Add and edit flows both expose the optional Until stopped mode.
@@ -602,7 +683,8 @@ add_output=$(printf '2\n50\n2\n\n2\n\n11\n' | env HOME="$CASE_HOME" \
 if env HOME="$CASE_HOME" /bin/bash -c 'source "$1"; for rule in "${ALERTS[@]}"; do [[ "$rule" == 50:LOW:0:100:* ]] && exit 0; done; exit 1' _ \
     "$CASE_HOME/.battmon/battery_config.sh" && \
     [[ "$add_output" == *"Until stopped — keep speaking until you stop it"* ]] && \
-    [[ "$add_output" == *"Stop with Mute, Volume Down, or plug in the charger."* ]]; then
+    [[ "$add_output" == *"Stop with Mute, Volume Down, or plug in the charger."* ]] && \
+    [[ "$add_output" == *"IMPORTANT: Automatic alerts are OFF"* ]]; then
     pass "new alerts can use clear Until stopped behavior"
 else
     fail "new alerts can use clear Until stopped behavior"
@@ -636,7 +718,7 @@ else
 fi
 
 # Audio settings expose and persist the media pause/resume switch.
-media_setting_output=$(printf '7\n\nn\n11\n' | env HOME="$CASE_HOME" \
+media_setting_output=$(printf '7\n1\n\nn\n3\n11\n' | env HOME="$CASE_HOME" \
     PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
     TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
     TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" 2>&1)
@@ -645,6 +727,25 @@ if grep -q '^PAUSE_MEDIA=false$' "$CASE_HOME/.battmon/battery_config.sh" && \
     pass "media pause and resume setting is user-visible and persistent"
 else
     fail "media pause and resume setting is user-visible and persistent"
+fi
+
+# Permission setup is intentional, read-only, and reports each running app.
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "10:LOW:1:100:ten percent"
+permission_output=$(printf '7\n2\n\n3\n11\n' | env HOME="$CASE_HOME" \
+    PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
+    TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
+    TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false TEST_SAY_LOG="$SAY_LOG" \
+    TEST_EVENT_LOG="$EVENT_LOG" TEST_RUNNING_MEDIA_APPS='Spotify,Google Chrome,Brave Browser' \
+    TEST_SPOTIFY_STATE=playing TEST_BRAVE_CONTROL_FAIL=1 "$ROOT_DIR/battmon" 2>&1)
+if [[ "$permission_output" == *"[READY] Spotify"* ]] && \
+    [[ "$permission_output" == *"[READY] Google Chrome"* ]] && \
+    [[ "$permission_output" == *"[BLOCKED] Brave Browser"* ]] && \
+    [[ "$permission_output" == *"Allow JavaScript from Apple Events"* ]] && \
+    [ ! -s "$SAY_LOG" ] && [ ! -s "$EVENT_LOG" ]; then
+    pass "media permission check is visible, actionable, and does not alter playback"
+else
+    fail "media permission check is visible, actionable, and does not alter playback"
 fi
 
 # The interactive test uses the production media pause/restore/resume path.

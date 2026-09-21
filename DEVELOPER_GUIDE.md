@@ -60,10 +60,11 @@ This matters because macOS can report AC power while the battery is still discha
 
 Trigger selection supports:
 
-1. Exact threshold arrival.
-2. Inclusive threshold crossing between LaunchAgent runs.
-3. A transition into charging or discharging while already beyond a threshold.
-4. Large jumps across several thresholds. LOW selects the lowest crossed configured threshold; HIGH selects the highest crossed threshold.
+1. Exact threshold arrival in the configured direction.
+2. Threshold crossing between LaunchAgent runs: downward for LOW and upward for HIGH.
+3. Large jumps across several thresholds. LOW selects the lowest crossed configured threshold; HIGH selects the highest crossed threshold.
+
+A power-mode change by itself is never a trigger. Plugging in while already above a HIGH threshold or unplugging while already below a LOW threshold records a new baseline without speaking. Likewise, LOW rules cannot fire while the battery is charging upward, and HIGH rules cannot fire while it is discharging downward.
 
 Only the selected rule is announced. State is persisted before speech begins so overlapping manual/LaunchAgent checks cannot repeat the same alert.
 
@@ -86,7 +87,7 @@ LAST_SOURCE=BATTERY
 LAST_SESSION_BLOCKED=0
 ```
 
-The monitor lock and configuration lock live under the owner-only `~/.battmon` directory. Stale locks are reclaimed only when their recorded process is no longer the corresponding Battmon process.
+The monitor lock and configuration lock live under the owner-only `~/.battmon` directory. Stale locks are reclaimed only when their recorded process is no longer the corresponding Battmon process. `battmon stop` also enumerates exact `~/.battmon/battery_monitor.sh` command paths, so an orphaned monitor is still found when an abnormal older process lost its lock. It requests trap-driven cleanup with `TERM`, waits up to ten seconds, and uses `KILL` only for an exact unresponsive Battmon process.
 
 ## Interruptible speech
 
@@ -121,6 +122,8 @@ For browsers, a short script scans ordinary web tabs and marks only media elemen
 Cleanup stops speech, restores the original volume and mute state, and only then resumes the recorded players. A player that was paused beforehand is never resumed, and an application closed during the alert is not relaunched. If media was paused, the original audio state is restored even when Volume Down or Mute caused the interruption; otherwise, a deliberate user audio change is preserved as before.
 
 Battmon does not synthesize a global media key. That would require Accessibility permission, could control the wrong application, and could resume media Battmon did not pause. Unsupported applications are therefore left unchanged. Chromium browsers and Safari must allow JavaScript from Apple Events; the interactive test prints the exact menu path when this permission is missing.
+
+The Audio & Media Settings permission check sends only read-only player-state and harmless browser-JavaScript probes. It can trigger a missed macOS Automation prompt and reports each running application as READY, BLOCKED, or needing an open website tab. It never pauses, starts, or changes the volume of media.
 
 The TUI media test invokes the same production `--test-media` path as real alerts. It takes the monitor lock, verifies supported media is actively playing, pauses it, speaks one test sentence, restores audio, and resumes only the recorded media. Native-player Apple event failures are reported separately from a genuine no-media result, including the terminal-specific macOS Automation recovery path. Native-player Apple events have a two-second timeout and browser scans have a five-second timeout, so a stuck application cannot indefinitely block an alert or cleanup. `battmon stop` also clears dead monitor locks and safely asks a live monitor to terminate.
 

@@ -69,10 +69,72 @@ remove_managed_link() {
     fi
 }
 
+list_runtime_monitor_pids() {
+    local pid_value command_value monitor_script="$RUNTIME_DIR/battery_monitor.sh"
+    while read -r pid_value command_value; do
+        [[ "$pid_value" =~ ^[0-9]+$ ]] || continue
+        case "$command_value" in
+            "/bin/bash $monitor_script"|\
+            "/bin/bash $monitor_script --test-media"|\
+            "/bin/bash $monitor_script --check-media-permissions")
+                printf '%s\n' "$pid_value"
+                ;;
+        esac
+    done < <(ps -ax -o pid=,command= 2>/dev/null)
+}
+
+runtime_monitor_pid_is_alive() {
+    local pid_value="$1" command_value state_value monitor_script="$RUNTIME_DIR/battery_monitor.sh"
+    [[ "$pid_value" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid_value" 2>/dev/null || return 1
+    state_value=$(ps -p "$pid_value" -o state= 2>/dev/null || true)
+    [[ "$state_value" == Z* ]] && return 1
+    command_value=$(ps -p "$pid_value" -o command= 2>/dev/null || true)
+    case "$command_value" in
+        "/bin/bash $monitor_script"|\
+        "/bin/bash $monitor_script --test-media"|\
+        "/bin/bash $monitor_script --check-media-permissions") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 stop_service() {
-    local uid_value
+    local uid_value pid_value attempts=0 remaining=0 forced_stop=0 monitor_count=0
+    local monitor_pids=()
     uid_value=$(id -u)
     launchctl bootout "gui/${uid_value}/${LABEL}" >/dev/null 2>&1 || true
+    while IFS= read -r pid_value; do
+        if [ -n "$pid_value" ]; then
+            monitor_pids+=("$pid_value")
+            monitor_count=$((monitor_count + 1))
+        fi
+    done < <(list_runtime_monitor_pids)
+    if [ "$monitor_count" -gt 0 ]; then
+        for pid_value in "${monitor_pids[@]}"; do
+            runtime_monitor_pid_is_alive "$pid_value" && kill -TERM "$pid_value" 2>/dev/null || true
+        done
+        while [ "$attempts" -lt 100 ]; do
+            remaining=0
+            for pid_value in "${monitor_pids[@]}"; do
+                if runtime_monitor_pid_is_alive "$pid_value"; then
+                    remaining=1
+                    break
+                fi
+            done
+            [ "$remaining" -eq 0 ] && break
+            sleep 0.1
+            attempts=$((attempts + 1))
+        done
+        for pid_value in "${monitor_pids[@]}"; do
+            if runtime_monitor_pid_is_alive "$pid_value"; then
+                kill -KILL "$pid_value" 2>/dev/null || true
+                forced_stop=1
+            fi
+        done
+    fi
+    rm -f "$RUNTIME_DIR/monitor.lock/pid" 2>/dev/null || true
+    rmdir "$RUNTIME_DIR/monitor.lock" 2>/dev/null || true
+    [ "$forced_stop" -eq 1 ] && echo "Battmon: forced an unresponsive old monitor to stop." >&2
 }
 
 confirm_uninstall() {
@@ -130,7 +192,7 @@ preflight() {
         return 1
     fi
     local command_name missing=0
-    for command_name in pmset say launchctl osascript pgrep ioreg sysctl awk sed sort mktemp plutil; do
+    for command_name in pmset say launchctl osascript pgrep ps ioreg sysctl awk sed sort mktemp plutil; do
         if ! command -v "$command_name" >/dev/null 2>&1; then
             printf 'Missing required macOS command: %s\n' "$command_name" >&2
             missing=1

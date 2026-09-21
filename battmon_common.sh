@@ -219,6 +219,35 @@ ensure_runtime_dirs() {
     chmod 700 "$BATTMON_RUNTIME_DIR" "$BATTMON_LOG_DIR" 2>/dev/null || true
 }
 
+list_managed_monitor_pids() {
+    local pid_value command_value monitor_script="$BATTMON_RUNTIME_DIR/battery_monitor.sh"
+    while read -r pid_value command_value; do
+        [[ "$pid_value" =~ ^[0-9]+$ ]] || continue
+        case "$command_value" in
+            "/bin/bash $monitor_script"|\
+            "/bin/bash $monitor_script --test-media"|\
+            "/bin/bash $monitor_script --check-media-permissions")
+                printf '%s\n' "$pid_value"
+                ;;
+        esac
+    done < <(ps -ax -o pid=,command= 2>/dev/null)
+}
+
+is_managed_monitor_pid() {
+    local pid_value="$1" command_value state_value monitor_script="$BATTMON_RUNTIME_DIR/battery_monitor.sh"
+    [[ "$pid_value" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid_value" 2>/dev/null || return 1
+    state_value=$(ps -p "$pid_value" -o state= 2>/dev/null || true)
+    [[ "$state_value" == Z* ]] && return 1
+    command_value=$(ps -p "$pid_value" -o command= 2>/dev/null || true)
+    case "$command_value" in
+        "/bin/bash $monitor_script"|\
+        "/bin/bash $monitor_script --test-media"|\
+        "/bin/bash $monitor_script --check-media-permissions") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 release_config_lock() {
     rm -f "$BATTMON_CONFIG_LOCK/pid" 2>/dev/null || true
     rmdir "$BATTMON_CONFIG_LOCK" 2>/dev/null || true

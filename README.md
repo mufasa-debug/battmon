@@ -19,6 +19,8 @@ To install without starting background monitoring:
 ./setup.sh --no-start
 ```
 
+`--no-start` deliberately disables automatic alerts. The menu displays **Monitor: OFF — ALERTS DISABLED**, and `battmon doctor` reports the stopped service as a blocking failure until `battmon start` is run.
+
 Battmon uses only built-in macOS tools. The installer does not download packages or overwrite unrelated commands.
 
 ## Commands
@@ -29,7 +31,7 @@ battmon status       Battery, power state, service, volume, and rules
 battmon doctor       Read-only health checks
 battmon run          One immediate evaluation cycle
 battmon start        Install/load the LaunchAgent
-battmon stop         Stop the LaunchAgent
+battmon stop         Stop the LaunchAgent and any orphan monitor processes
 battmon restart      Reinstall and reload the LaunchAgent
 battmon test         Interactive voice/cutoff tests
 battmon edit         Edit the active configuration
@@ -54,7 +56,7 @@ PERCENT:TYPE:REPEATS:PAUSE_MS:MESSAGE
 
 The default pause is **100 ms**. Values from **50 ms through 60,000 ms** are accepted. A repeat value of `0` means **Until stopped**; fixed repeat values are `1` through `100`.
 
-`PAUSE_MEDIA=true` enables pause/speak/restore/resume behavior and can be changed in the interactive **Audio & media settings** screen. For Chrome or Brave, enable **View → Developer → Allow JavaScript from Apple Events**. For Safari, enable **Develop → Allow JavaScript from Apple Events**. Battmon deliberately does not send a blind global Play/Pause key, so unsupported applications are not accidentally started or resumed.
+`PAUSE_MEDIA=true` enables pause/speak/restore/resume behavior and can be changed in the interactive **Audio & media settings** screen. That screen also has **Check or request media permissions**, which safely probes running players and browsers without changing playback or volume. For Chrome, Brave, or Edge, enable **View → Developer → Allow JavaScript from Apple Events**. For Safari, enable **Develop → Allow JavaScript from Apple Events**. Battmon deliberately does not send a blind global Play/Pause key, so unsupported applications are not accidentally started or resumed.
 
 `STARTUP_GRACE_SECONDS=300` keeps Battmon silent for the first five minutes after a cold boot. Battmon also suppresses alerts for the entire time the macOS session is locked, then records the current battery state as a quiet baseline when the session becomes active. This prevents a 1% alert from speaking while a powered-off Mac is first connected to a charger or before the owner unlocks it.
 
@@ -62,6 +64,7 @@ The default pause is **100 ms**. Values from **50 ms through 60,000 ms** are acc
 
 - **Charging alert** (stored as `HIGH`): speaks when the battery goes up to the chosen percentage. The voice stops when charging stops or the charger is unplugged.
 - **Low-battery alert** (stored as `LOW`): speaks when the battery goes down to the chosen percentage. The voice stops when charging starts.
+- A charger change alone never triggers a rule. LOW stays silent while the percentage rises, and HIGH stays silent while it falls—even when the current percentage exactly matches the rule.
 - Percentages below **30%** are always low-battery alerts. Battmon skips the type question and clearly states that plugging in the charger stops the voice.
 - Low-battery alerts use the battery's real direction, including the unusual case where an adapter is attached but the battery is still going down.
 - If several thresholds are crossed between checks, Battmon selects the most relevant critical threshold instead of losing all of them.

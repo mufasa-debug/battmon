@@ -160,7 +160,9 @@ service_install() {
 }
 
 service_stop() {
-    local uid_value service_was_running=0 monitor_stopped=0
+    local uid_value service_was_running=0 monitor_stopped=0 forced_stop=0
+    local monitor_pid existing_pid attempts=0 remaining=0 lock_pid="" lock_listed=0
+    local monitor_pids=()
     uid_value=$(id -u)
     if is_service_running; then
         service_was_running=1
@@ -170,42 +172,54 @@ service_stop() {
         fi
     fi
 
+    while IFS= read -r monitor_pid; do
+        [ -n "$monitor_pid" ] && monitor_pids+=("$monitor_pid")
+    done < <(list_managed_monitor_pids)
+
     if [ -f "$BATTMON_MONITOR_LOCK/pid" ]; then
-        local monitor_pid monitor_command attempts=0
-        monitor_pid=$(sed -n '1p' "$BATTMON_MONITOR_LOCK/pid" 2>/dev/null || true)
-        if [[ "$monitor_pid" =~ ^[0-9]+$ ]] && kill -0 "$monitor_pid" 2>/dev/null; then
-            monitor_command=$(ps -p "$monitor_pid" -o command= 2>/dev/null || true)
-            case "$monitor_command" in
-                *battery_monitor.sh*)
-                    kill -TERM "$monitor_pid" 2>/dev/null || true
-                    while kill -0 "$monitor_pid" 2>/dev/null && [ "$attempts" -lt 20 ]; do
-                        sleep 0.1
-                        attempts=$((attempts + 1))
-                    done
-                    if kill -0 "$monitor_pid" 2>/dev/null; then
-                        printf 'Battmon: monitor process %s did not stop safely. Restart the Mac before testing media.\n' "$monitor_pid" >&2
-                        return 1
-                    fi
-                    # TERM should run the monitor cleanup trap. If an abnormal
-                    # earlier run left the directory behind, remove it only
-                    # when it still belongs to the process we just stopped.
-                    if [ "$(sed -n '1p' "$BATTMON_MONITOR_LOCK/pid" 2>/dev/null || true)" = "$monitor_pid" ]; then
-                        rm -f "$BATTMON_MONITOR_LOCK/pid" 2>/dev/null || true
-                        rmdir "$BATTMON_MONITOR_LOCK" 2>/dev/null || true
-                    fi
-                    monitor_stopped=1
-                    ;;
-                *)
-                    rm -f "$BATTMON_MONITOR_LOCK/pid" 2>/dev/null || true
-                    rmdir "$BATTMON_MONITOR_LOCK" 2>/dev/null || true
-                    ;;
-            esac
-        else
+        lock_pid=$(sed -n '1p' "$BATTMON_MONITOR_LOCK/pid" 2>/dev/null || true)
+        if is_managed_monitor_pid "$lock_pid"; then
+            for existing_pid in "${monitor_pids[@]}"; do
+                [ "$existing_pid" = "$lock_pid" ] && lock_listed=1
+            done
+            [ "$lock_listed" -eq 0 ] && monitor_pids+=("$lock_pid")
+        fi
+    fi
+
+    if [ "${#monitor_pids[@]}" -gt 0 ]; then
+        monitor_stopped=1
+        for monitor_pid in "${monitor_pids[@]}"; do
+            is_managed_monitor_pid "$monitor_pid" && kill -TERM "$monitor_pid" 2>/dev/null || true
+        done
+        while [ "$attempts" -lt 100 ]; do
+            remaining=0
+            for monitor_pid in "${monitor_pids[@]}"; do
+                if is_managed_monitor_pid "$monitor_pid"; then
+                    remaining=1
+                    break
+                fi
+            done
+            [ "$remaining" -eq 0 ] && break
+            sleep 0.1
+            attempts=$((attempts + 1))
+        done
+        for monitor_pid in "${monitor_pids[@]}"; do
+            if is_managed_monitor_pid "$monitor_pid"; then
+                kill -KILL "$monitor_pid" 2>/dev/null || true
+                forced_stop=1
+            fi
+        done
+    fi
+
+    if [ -f "$BATTMON_MONITOR_LOCK/pid" ]; then
+        lock_pid=$(sed -n '1p' "$BATTMON_MONITOR_LOCK/pid" 2>/dev/null || true)
+        if ! is_managed_monitor_pid "$lock_pid"; then
             rm -f "$BATTMON_MONITOR_LOCK/pid" 2>/dev/null || true
             rmdir "$BATTMON_MONITOR_LOCK" 2>/dev/null || true
         fi
     fi
 
+    [ "$forced_stop" -eq 1 ] && echo "Battmon: an unresponsive orphan monitor required a forced stop." >&2
     if [ "$service_was_running" -eq 1 ] || [ "$monitor_stopped" -eq 1 ]; then
         echo "Background monitor and active alert stopped."
     else
@@ -301,6 +315,13 @@ alert_type_plain_name() {
     esac
 }
 
+warn_if_automatic_alerts_disabled() {
+    if ! is_service_running; then
+        echo "IMPORTANT: Automatic alerts are OFF. This rule is saved but will not run."
+        echo "Use option 9, then option 1, when you want background alerts enabled."
+    fi
+}
+
 repeat_display() {
     if [ "$1" = "0" ]; then
         printf 'Until stopped'
@@ -385,7 +406,11 @@ show_status() {
     printf " Volume target         : %s%%\n" "$ALERT_VOLUME"
     printf " Pause playing media   : %s\n" "$([ "$PAUSE_MEDIA" = true ] && echo On || echo Off)"
     printf " Startup quiet period  : %s seconds\n" "$STARTUP_GRACE_SECONDS"
-    printf " Background service    : %s\n" "$(is_service_running && echo Running || echo Stopped)"
+    if is_service_running; then
+        echo " Background service    : Running"
+    else
+        echo " Background service    : STOPPED — automatic alerts are disabled"
+    fi
     echo "──────────────────────────────────────────────────────────────────────────"
     if [ -n "$CONFIG_WARNING" ]; then
         printf " Config note: %s\n" "$CONFIG_WARNING"
@@ -461,6 +486,7 @@ edit_alert_at_index() {
     ALERTS[$target_idx]="${lvl}:${new_typ}:${new_rep}:${new_del}:${new_msg}"
     save_config || return
     echo "Alert #$alert_num (${lvl}%) updated successfully."
+    warn_if_automatic_alerts_disabled
 }
 
 edit_alert() {
@@ -604,6 +630,7 @@ add_alert() {
         save_config || return
         echo "Added alert: ${new_lvl}% ($(alert_type_plain_name "$new_typ")) -> \"${new_msg}\""
     fi
+    warn_if_automatic_alerts_disabled
 }
 
 delete_alert() {
@@ -788,6 +815,31 @@ edit_volume_settings() {
 
     save_config || return
     echo "Audio settings updated: target ${ALERT_VOLUME}%; pause media $([ "$PAUSE_MEDIA" = true ] && echo on || echo off)."
+}
+
+audio_media_menu() {
+    while true; do
+        echo ""
+        echo "─── Audio & Media Settings ───────────────────────────────────────────────"
+        echo "  1) Change alert volume and media pausing"
+        echo "  2) Check or request media permissions"
+        echo "  3) Return to Main Menu"
+        echo "──────────────────────────────────────────────────────────────────────────"
+        local audio_choice
+        if ! prompt_number "Enter choice [1-3] (or 'c' to cancel): " 1 3 "3" audio_choice; then
+            return
+        fi
+        case "$audio_choice" in
+            1) edit_volume_settings ;;
+            2)
+                echo ""
+                echo "Open any player or browser you want Battmon to control first."
+                /bin/bash "$SCRIPT_DIR/battery_monitor.sh" --check-media-permissions
+                read -r -p "Press [Enter] to return to Audio & Media Settings..." || true
+                ;;
+            3) return ;;
+        esac
+    done
 }
 
 reset_defaults() {
@@ -1021,6 +1073,7 @@ main_menu() {
             return 1
         }
         local pct="N/A" pwr="Power unavailable" audio_info="" cur_v="N/A" cur_muted=""
+        local monitor_line=" Monitor: OFF - ALERTS DISABLED"
         if get_battery_state; then
             pct="$BATTERY_PERCENT"
             pwr=$(battery_status_label)
@@ -1029,14 +1082,14 @@ main_menu() {
             read -r cur_v cur_muted <<< "$audio_info"
             [ "$cur_muted" = "true" ] && cur_v="${cur_v}M"
         fi
+        is_service_running && monitor_line=" Monitor: ON - automatic alerts active"
 
         clear_main_menu_screen
         echo "─── BATTMON 🦇 Battery Voice Monitor ─────────────────────────────────────"
         local bat_str=" Battery: ${pct}% (${pwr})"
         [ "$pct" = "N/A" ] && bat_str=" Battery: Not detected"
-        local vol_str=" Volume target: ${ALERT_VOLUME}%"
-        printf "%-36s | Current volume: %s\n" "$bat_str" "${cur_v}"
-        printf "%-36s | Stop: charger change or MUTE/DOWN\n" "$vol_str"
+        printf "%-36s | Volume: %s (target %s%%)\n" "$bat_str" "${cur_v}" "$ALERT_VOLUME"
+        printf "%-36s | Stop: charger or MUTE/DOWN\n" "$monitor_line"
         echo "──────────────────────────────────────────────────────────────────────────"
         echo " Configured Alerts:"
         local idx=0
@@ -1084,7 +1137,7 @@ main_menu() {
                 ;;
             5) edit_timing ;;
             6) apply_timing_to_existing_rules ;;
-            7) edit_volume_settings ;;
+            7) audio_media_menu ;;
             8) test_voice_interruption ;;
             9) service_menu ;;
             10) reset_defaults ;;
@@ -1109,7 +1162,7 @@ doctor() {
         echo " [FAIL] Battmon requires macOS"
         failures=$((failures + 1))
     fi
-    for command_name in pmset say launchctl osascript pgrep ioreg sysctl awk sed sort mktemp plutil; do
+    for command_name in pmset say launchctl osascript pgrep ps ioreg sysctl awk sed sort mktemp plutil; do
         if command -v "$command_name" >/dev/null 2>&1; then
             printf ' [OK] %s\n' "$command_name"
         else
@@ -1144,7 +1197,8 @@ doctor() {
     if is_service_running; then
         echo " [OK] Background service loaded"
     else
-        echo " [INFO] Background service stopped"
+        echo " [FAIL] Background service stopped — automatic alerts cannot run"
+        failures=$((failures + 1))
     fi
     echo "──────────────────────────────────────────────────────────────────────────"
     if [ "$failures" -eq 0 ]; then

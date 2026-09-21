@@ -1,0 +1,11 @@
+#!/bin/bash
+
+if [ "${TEST_PS_FAKE_MONITORS:-0}" = "1" ] && [ "$*" = "-ax -o pid=,command=" ]; then
+    printf '123 /bin/bash %s/battery_monitor.sh\n' "${BATTMON_RUNTIME_DIR:?}"
+    printf '124 /bin/bash %s/battery_monitor.sh --test-media\n' "${BATTMON_RUNTIME_DIR:?}"
+    printf '126 /bin/bash %s/battery_monitor.sh --check-media-permissions\n' "${BATTMON_RUNTIME_DIR:?}"
+    printf '125 /bin/bash /tmp/unrelated/battery_monitor.sh\n'
+    exit 0
+fi
+
+exec /bin/ps "$@"

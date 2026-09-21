@@ -25,6 +25,7 @@ MEDIA_BROWSER_WARNINGS=()
 MONITOR_LOCK_OWNER_PID=""
 BROWSER_PAUSE_JS='(()=>{let n=0;for(const m of document.querySelectorAll("audio,video")){if(!m.paused&&!m.ended){m.setAttribute("data-battmon-paused-by-daemon","1");m.pause();n++;}}return n;})()'
 BROWSER_RESUME_JS='(()=>{let n=0;for(const m of document.querySelectorAll("audio,video")){if(m.getAttribute("data-battmon-paused-by-daemon")==="1"){m.removeAttribute("data-battmon-paused-by-daemon");m.play().catch(()=>{});n++;}}return n;})()'
+BROWSER_PERMISSION_JS='(()=>1)()'
 
 release_monitor_lock() {
     [ "$LOCK_HELD" -eq 1 ] || return 0
@@ -651,7 +652,7 @@ select_trigger_rule() {
     SELECTED_ALERT=""
     SELECTED_LEVEL=""
     SELECTED_TYPE=""
-    local alert level type exact=0 crossed=0 transitioned=0
+    local alert level type exact=0 crossed=0
 
     for alert in "${ALERTS[@]}"; do
         parse_alert_entry "$alert"
@@ -661,8 +662,19 @@ select_trigger_rule() {
 
         exact=0
         crossed=0
-        transitioned=0
-        [ "$BATTERY_PERCENT" -eq "$level" ] && exact=1
+
+        # A matching percentage is only a trigger when the battery reached it
+        # in the rule's direction. A charger change at the same percentage is
+        # not enough to create an alert.
+        if [ "$BATTERY_PERCENT" -eq "$level" ]; then
+            if [ -z "$LAST_PERCENT" ]; then
+                exact=1
+            elif [ "$type" = "LOW" ] && [ "$LAST_PERCENT" -gt "$BATTERY_PERCENT" ]; then
+                exact=1
+            elif [ "$type" = "HIGH" ] && [ "$LAST_PERCENT" -lt "$BATTERY_PERCENT" ]; then
+                exact=1
+            fi
+        fi
 
         if [ -n "$LAST_PERCENT" ]; then
             if [ "$type" = "LOW" ] && [ "$BATTERY_PERCENT" -lt "$level" ] && [ "$LAST_PERCENT" -gt "$level" ]; then
@@ -672,15 +684,7 @@ select_trigger_rule() {
             fi
         fi
 
-        if [ -n "$LAST_MODE" ] && [ "$LAST_MODE" != "$BATTERY_MODE" ]; then
-            if [ "$type" = "LOW" ] && [ "$BATTERY_PERCENT" -le "$level" ]; then
-                transitioned=1
-            elif [ "$type" = "HIGH" ] && [ "$BATTERY_PERCENT" -ge "$level" ]; then
-                transitioned=1
-            fi
-        fi
-
-        if [ "$exact" -eq 0 ] && [ "$crossed" -eq 0 ] && [ "$transitioned" -eq 0 ]; then
+        if [ "$exact" -eq 0 ] && [ "$crossed" -eq 0 ]; then
             continue
         fi
         if [ "$BATTERY_PERCENT" = "$LAST_PERCENT" ] && [ "$level" = "$LAST_ALERT_LEVEL" ] && [ "$type" = "$LAST_ALERT_TYPE" ] && [ "$BATTERY_MODE" = "$LAST_MODE" ]; then
@@ -732,6 +736,159 @@ print_media_control_guidance() {
         echo "For Safari: Develop > Allow JavaScript from Apple Events."
         echo "If macOS asks for Automation permission, choose Allow, then retry the test."
     fi
+}
+
+check_native_media_permission() {
+    local process_name="$1" app_name="$2" probe_type="$3"
+    if ! media_app_running "$process_name"; then
+        printf ' [SKIP] %-18s Not running; open it and check again.\n' "$app_name"
+        return 0
+    fi
+
+    if [ "$probe_type" = "quicktime" ]; then
+        if osascript \
+            -e 'with timeout of 2 seconds' \
+            -e "tell application \"$app_name\" to count documents" \
+            -e 'end timeout' >/dev/null 2>&1; then
+            printf ' [READY] %-17s Battmon can control it.\n' "$app_name"
+        else
+            printf ' [BLOCKED] %-15s Allow Automation access in System Settings.\n' "$app_name"
+        fi
+    elif osascript \
+        -e 'with timeout of 2 seconds' \
+        -e "tell application \"$app_name\" to get player state" \
+        -e 'end timeout' >/dev/null 2>&1; then
+        printf ' [READY] %-17s Battmon can control it.\n' "$app_name"
+    else
+        printf ' [BLOCKED] %-15s Allow Automation access in System Settings.\n' "$app_name"
+    fi
+}
+
+check_chromium_media_permission() {
+    local process_name="$1" app_name="$2" result attempted_count error_count
+    if ! media_app_running "$process_name"; then
+        printf ' [SKIP] %-18s Not running; open it and check again.\n' "$app_name"
+        return 0
+    fi
+
+    result=$(osascript \
+        -e 'on run argv' \
+        -e 'set probeScript to item 1 of argv' \
+        -e 'with timeout of 5 seconds' \
+        -e "tell application \"$app_name\"" \
+        -e 'set attemptedCount to 0' \
+        -e 'set errorCount to 0' \
+        -e 'repeat with browserWindow in windows' \
+        -e 'repeat with browserTab in tabs of browserWindow' \
+        -e 'try' \
+        -e 'set tabURL to URL of browserTab' \
+        -e 'if tabURL starts with "http" then' \
+        -e 'set attemptedCount to attemptedCount + 1' \
+        -e 'execute browserTab javascript probeScript' \
+        -e 'end if' \
+        -e 'on error' \
+        -e 'set errorCount to errorCount + 1' \
+        -e 'end try' \
+        -e 'end repeat' \
+        -e 'end repeat' \
+        -e 'return (attemptedCount as text) & ":" & (errorCount as text)' \
+        -e 'end tell' \
+        -e 'end timeout' \
+        -e 'end run' -- "$BROWSER_PERMISSION_JS" 2>/dev/null) || result="blocked"
+
+    if [ "$result" = "blocked" ]; then
+        printf ' [BLOCKED] %-15s Allow Automation and JavaScript from Apple Events.\n' "$app_name"
+        return 0
+    fi
+    IFS=: read -r attempted_count error_count <<< "$result"
+    if ! [[ "$attempted_count" =~ ^[0-9]+$ ]] || ! [[ "$error_count" =~ ^[0-9]+$ ]]; then
+        printf ' [BLOCKED] %-15s Could not verify browser control.\n' "$app_name"
+    elif [ "$attempted_count" -eq 0 ]; then
+        printf ' [CHECK] %-17s Open a normal website tab and check again.\n' "$app_name"
+    elif [ "$error_count" -ge "$attempted_count" ]; then
+        printf ' [BLOCKED] %-15s Enable JavaScript from Apple Events.\n' "$app_name"
+    else
+        printf ' [READY] %-17s Battmon can inspect media tabs.\n' "$app_name"
+    fi
+}
+
+check_safari_media_permission() {
+    local result attempted_count error_count
+    if ! media_app_running "Safari"; then
+        printf ' [SKIP] %-18s Not running; open it and check again.\n' "Safari"
+        return 0
+    fi
+
+    result=$(osascript \
+        -e 'on run argv' \
+        -e 'set probeScript to item 1 of argv' \
+        -e 'with timeout of 5 seconds' \
+        -e 'tell application "Safari"' \
+        -e 'set attemptedCount to 0' \
+        -e 'set errorCount to 0' \
+        -e 'repeat with browserWindow in windows' \
+        -e 'repeat with browserTab in tabs of browserWindow' \
+        -e 'try' \
+        -e 'set tabURL to URL of browserTab' \
+        -e 'if tabURL starts with "http" then' \
+        -e 'set attemptedCount to attemptedCount + 1' \
+        -e 'do JavaScript probeScript in browserTab' \
+        -e 'end if' \
+        -e 'on error' \
+        -e 'set errorCount to errorCount + 1' \
+        -e 'end try' \
+        -e 'end repeat' \
+        -e 'end repeat' \
+        -e 'return (attemptedCount as text) & ":" & (errorCount as text)' \
+        -e 'end tell' \
+        -e 'end timeout' \
+        -e 'end run' -- "$BROWSER_PERMISSION_JS" 2>/dev/null) || result="blocked"
+
+    if [ "$result" = "blocked" ]; then
+        printf ' [BLOCKED] %-15s Allow Automation and JavaScript from Apple Events.\n' "Safari"
+        return 0
+    fi
+    IFS=: read -r attempted_count error_count <<< "$result"
+    if ! [[ "$attempted_count" =~ ^[0-9]+$ ]] || ! [[ "$error_count" =~ ^[0-9]+$ ]]; then
+        printf ' [BLOCKED] %-15s Could not verify browser control.\n' "Safari"
+    elif [ "$attempted_count" -eq 0 ]; then
+        printf ' [CHECK] %-17s Open a normal website tab and check again.\n' "Safari"
+    elif [ "$error_count" -ge "$attempted_count" ]; then
+        printf ' [BLOCKED] %-15s Enable JavaScript from Apple Events.\n' "Safari"
+    else
+        printf ' [READY] %-17s Battmon can inspect media tabs.\n' "Safari"
+    fi
+}
+
+run_media_permission_check() {
+    local lock_result
+    acquire_monitor_lock
+    lock_result=$?
+    if [ "$lock_result" -eq 2 ]; then
+        echo "An alert or monitor check is running. Try this permission check again shortly."
+        return 2
+    elif [ "$lock_result" -ne 0 ]; then
+        echo "Battmon could not start the permission check."
+        return 1
+    fi
+
+    echo "Checking media control. macOS may ask you to allow access."
+    echo "This check does not pause, play, or change the volume of any media."
+    echo ""
+    check_native_media_permission "Music" "Music" player
+    check_native_media_permission "Spotify" "Spotify" player
+    check_native_media_permission "QuickTime Player" "QuickTime Player" quicktime
+    check_chromium_media_permission "Google Chrome" "Google Chrome"
+    check_chromium_media_permission "Brave Browser" "Brave Browser"
+    check_chromium_media_permission "Microsoft Edge" "Microsoft Edge"
+    check_chromium_media_permission "Vivaldi" "Vivaldi"
+    check_chromium_media_permission "Chromium" "Chromium"
+    check_safari_media_permission
+    echo ""
+    echo "For BLOCKED native apps: System Settings > Privacy & Security > Automation."
+    echo "For Chrome/Brave/Edge: View > Developer > Allow JavaScript from Apple Events."
+    echo "For Safari: Develop > Allow JavaScript from Apple Events."
+    release_monitor_lock
 }
 
 run_media_test() {
@@ -854,6 +1011,11 @@ main() {
 
 if [ "${1:-}" = "--test-media" ]; then
     run_media_test
+    exit $?
+fi
+
+if [ "${1:-}" = "--check-media-permissions" ]; then
+    run_media_permission_check
     exit $?
 fi
 
