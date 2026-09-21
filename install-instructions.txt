@@ -1,35 +1,66 @@
-BATTMON QUICK SETUP
-===================
+============================================================
+  BATTMON: SUPER SIMPLE SETUP GUIDE (FOR ANY MAC)
+============================================================
 
-1. Open Terminal in this Battmon folder.
-2. Run:
+1. OPEN TERMINAL:
+   • Press Cmd + Space on your keyboard.
+   • Type "Terminal" and press Enter.
 
-   chmod +x setup.sh battmon battery_monitor.sh
-   ./setup.sh
+2. GO TO THIS FOLDER:
+   • Type "cd " (with a space after cd).
+   • Drag and drop this Battmon folder right into the Terminal window.
+   • Press Enter.
 
-The installer preserves an existing active configuration, creates a backup,
-installs one command (`battmon`), validates the LaunchAgent, and starts the
-background monitor.
+3. INSTALL (ONE COMMAND):
+   chmod +x setup.sh battmon battery_monitor.sh && ./setup.sh
 
-Install without starting the service:
+4. CHOOSE YOUR SETUP:
+   • Press 1 for Quick Install (Default alerts at 100%, 80%, 10%, 5%, 1%).
+   • Or press 2 if you want to add custom percentages right away.
 
-   ./setup.sh --no-start
+That's it! Battmon will now speak alerts in the background.
+It automatically starts every time you turn on your Mac.
 
-Useful commands:
+============================================================
+  HOW TO USE IT
+============================================================
 
-   battmon             Open the interactive manager
-   battmon status      Show current state and every alert
-   battmon doctor      Run read-only health checks
-   battmon test        Test speech and interruption controls
-   battmon start       Enable background monitoring
-   battmon stop        Stop background monitoring
+Run any of these commands from any Terminal window:
 
-The default alert pause is 100 ms. The manager accepts values down to 50 ms.
+• Open the settings menu:
+  battmon
 
-Safe uninstall (configuration preserved):
+• Check your battery & see all your alerts:
+  battmon status
 
-   ./setup.sh --uninstall
+• Test the voice and try out muting/charger stopping:
+  battmon test
 
-Full removal with a configuration backup:
+• Check system health and diagnostics:
+  battmon doctor
 
-   ./setup.sh --uninstall --purge
+• Pause or resume the background service:
+  battmon stop
+  battmon start
+
+============================================================
+  HOW TO STOP AN ALERT WHEN IT'S TALKING
+============================================================
+
+You have 4 easy ways to stop Battmon whenever it speaks:
+
+1. Plug in your charger (stops low-battery alerts immediately).
+2. Unplug your charger (stops full-charge alerts immediately).
+3. Press the MUTE key (F10) on your keyboard.
+4. Press the VOLUME DOWN key (F11) on your keyboard.
+
+============================================================
+  HOW TO UNINSTALL
+============================================================
+
+If you ever want to remove Battmon, open Terminal here and run:
+  ./setup.sh --uninstall
+
+Your custom alerts are automatically backed up.
+To completely remove all files including backups, run:
+  ./setup.sh --uninstall --purge
