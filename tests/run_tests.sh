@@ -109,6 +109,7 @@ run_monitor() {
         TEST_CONNECT_CHARGER_AFTER_SAY="${TEST_CONNECT_CHARGER_AFTER_SAY:-0}" \
         TEST_DISCONNECT_CHARGER_DURING_SAY="${TEST_DISCONNECT_CHARGER_DURING_SAY:-0}" \
         TEST_SYSTEM_UPTIME_SECONDS="${TEST_SYSTEM_UPTIME_SECONDS:-86400}" \
+        TEST_CURRENT_TIME="${TEST_CURRENT_TIME:-}" \
         TEST_CHROME_MEDIA_COUNT="${TEST_CHROME_MEDIA_COUNT:-0}" \
         TEST_BRAVE_MEDIA_COUNT="${TEST_BRAVE_MEDIA_COUNT:-0}" \
         TEST_SAFARI_MEDIA_COUNT="${TEST_SAFARI_MEDIA_COUNT:-0}" \
@@ -126,6 +127,89 @@ else
     fail "all shell files parse on Bash"
 fi
 assert_true "plist template is valid" plutil -lint "$ROOT_DIR/com.battery.batmon.plist"
+
+# Built-in default thresholds and optional quiet-time validation.
+if env HOME="$TEST_ROOT/defaults" /bin/bash -c 'source "$1"; load_config; expected="100 80 15 5 1"; actual=""; for a in "${ALERTS[@]}"; do parse_alert_entry "$a"; actual="${actual}${PARSED_LVL} "; done; [ "${actual% }" = "$expected" ] && [ "${#ALERT_TIMES[@]}" -eq 0 ]' _ "$ROOT_DIR/battmon_common.sh"; then
+    pass "factory defaults are exactly 100, 80, 15, 5, and 1 percent with quiet times off"
+else
+    fail "factory defaults are exactly 100, 80, 15, 5, and 1 percent with quiet times off"
+fi
+if /bin/bash -c 'source "$1"; is_valid_alert_time_range 02:00-10:00 && is_valid_alert_time_range 22:00-07:00 && ! is_valid_alert_time_range 24:00-07:00 && ! is_valid_alert_time_range 02:00-02:00' _ "$ROOT_DIR/battmon_common.sh"; then
+    pass "quiet-time ranges validate ordinary and overnight spans"
+else
+    fail "quiet-time ranges validate ordinary and overnight spans"
+fi
+new_case
+cat > "$CASE_HOME/.battmon/battery_config.sh" <<'EOF'
+#!/bin/bash
+REPEAT_COUNT=1
+REPEAT_DELAY_MS=100
+CHECK_INTERVAL_MS=50
+STARTUP_GRACE_SECONDS=300
+ALERT_VOLUME=60
+RESTORE_VOLUME=true
+PAUSE_MEDIA=true
+ALERT_TIMES=()
+ALERTS=(
+    "100:HIGH:1:100:Battery is fully charged"
+    "80:HIGH:1:100:The battery is optimally charged"
+    "39:LOW:1:100:Battery is at 39 percent"
+    "15:LOW:1:100:My custom fifteen"
+    "13:LOW:1:100:Battery is at 13 percent"
+    "10:LOW:1:100:Charge up your battery"
+    "6:LOW:1:100:Battery is at 6 percent"
+    "39:LOW:1:100:My custom thirty nine"
+    "5:LOW:1:100:Battery is critically low"
+    "1:LOW:1:100:Battery is critically low"
+)
+EOF
+env HOME="$CASE_HOME" "$ROOT_DIR/battmon" migrate >/dev/null
+if env HOME="$CASE_HOME" /bin/bash -c 'source "$1"; load_config || exit 1; retired=0; custom=0; for a in "${ALERTS[@]}"; do parse_alert_entry "$a"; case "$PARSED_LVL:$PARSED_MSG" in "39:Battery is at 39 percent"|"13:Battery is at 13 percent"|"10:Charge up your battery"|"10:Battery is at 10 percent. Charge up your battery"|"6:Battery is at 6 percent") retired=1 ;; "39:My custom thirty nine"|"15:My custom fifteen") custom=$((custom + 1)) ;; esac; done; [ "$retired" -eq 0 ] && [ "$custom" -eq 2 ]' _ "$ROOT_DIR/battmon_common.sh"; then
+    pass "migration removes only recognized retired defaults and retains custom alert rules"
+else
+    fail "migration removes only recognized retired defaults and retains custom alert rules"
+fi
+if env PATH="$TEST_BIN:$ORIGINAL_PATH" TEST_CURRENT_TIME=03:00 /bin/bash -c 'source "$1"; ALERT_TIMES=(02:00-10:00); alert_time_is_quiet_now' _ "$ROOT_DIR/battmon_common.sh" && \
+   env PATH="$TEST_BIN:$ORIGINAL_PATH" TEST_CURRENT_TIME=12:00 /bin/bash -c 'source "$1"; ALERT_TIMES=(02:00-10:00); ! alert_time_is_quiet_now' _ "$ROOT_DIR/battmon_common.sh" && \
+   env PATH="$TEST_BIN:$ORIGINAL_PATH" TEST_CURRENT_TIME=01:00 /bin/bash -c 'source "$1"; ALERT_TIMES=(22:00-07:00); alert_time_is_quiet_now' _ "$ROOT_DIR/battmon_common.sh"; then
+    pass "quiet-time matching handles daytime and overnight intervals"
+else
+    fail "quiet-time matching handles daytime and overnight intervals"
+fi
+
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "15:LOW:1:100:fifteen"
+printf 'ALERT_TIMES=("02:00-10:00")\n' >> "$CASE_HOME/.battmon/battery_config.sh"
+write_state "$CASE_HOME/.battmon/state" 16 "" "" discharging BATTERY
+TEST_CURRENT_TIME=03:00 TEST_BATTERY_PERCENT=15 TEST_BATTERY_MODE=discharging run_monitor
+if [ ! -s "$SAY_LOG" ] && grep -q '^LAST_PERCENT=15$' "$CASE_HOME/.battmon/state"; then
+    pass "monitor stays silent and updates its baseline during quiet time"
+else
+    fail "monitor stays silent and updates its baseline during quiet time"
+fi
+TEST_CURRENT_TIME=10:00 TEST_BATTERY_PERCENT=15 TEST_BATTERY_MODE=discharging run_monitor
+if [ ! -s "$SAY_LOG" ]; then
+    pass "threshold crossed during quiet time is not replayed afterward"
+else
+    fail "threshold crossed during quiet time is not replayed afterward"
+fi
+
+new_case
+write_config "$CASE_HOME/.battmon/battery_config.sh" "15:LOW:1:100:fifteen"
+alert_times_menu_output=$(printf '7\n1\n2:00 AM\n10:00 AM\n2\n1\n4 AM\n10 AM\n4\n12\n' | env HOME="$CASE_HOME" \
+    PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
+    TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
+    TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" 2>&1)
+if env HOME="$CASE_HOME" /bin/bash -c 'source "$1"; [ "${#ALERT_TIMES[@]}" -eq 1 ] && [ "${ALERT_TIMES[0]}" = "04:00-10:00" ]' _ \
+    "$CASE_HOME/.battmon/battery_config.sh" && \
+    [[ "$alert_times_menu_output" == *"Add or edit the times when alerts should stay quiet."* ]] && \
+    [[ "$alert_times_menu_output" == *"4:00 AM to 10:00 AM"* ]] && \
+    [[ "$alert_times_menu_output" == *"Enter each time with AM or PM (for example, 2:00 AM)."* ]] && \
+    [[ "$alert_times_menu_output" == *"Enter the number beside the quiet-time range you want to edit."* ]]; then
+    pass "main menu alert times can be added, edited, and persisted"
+else
+    fail "main menu alert times can be added, edited, and persisted"
+fi
 
 # Exact low threshold and debounce.
 new_case
@@ -523,11 +607,11 @@ fi
 # Duplicate rules merge without losing either phrase.
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" \
-    "10:LOW:1:100:Battery is at 10 percent" "10:LOW:1:100:Charge up your battery"
+    "10:LOW:1:100:Battery is at 10 percent custom" "10:LOW:1:100:Charge up your battery now"
 env HOME="$CASE_HOME" BATTMON_CONFIG_FILE="$CASE_HOME/.battmon/battery_config.sh" \
     /bin/bash -c 'source "$1"; load_config; printf "%s\n" "${ALERTS[@]}"' _ \
     "$ROOT_DIR/battmon_common.sh" > "$CASE_HOME/normalized.txt"
-if grep -q 'Battery is at 10 percent. Charge up your battery' "$CASE_HOME/normalized.txt"; then
+if grep -q 'Battery is at 10 percent custom. Charge up your battery now' "$CASE_HOME/normalized.txt"; then
     pass "duplicate threshold messages merge deterministically"
 else
     fail "duplicate threshold messages merge deterministically"
@@ -621,7 +705,7 @@ fi
 # Every main-menu render clears both the visible display and scrollback.
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" "10:LOW:1:100:ten percent"
-menu_output=$(printf '12\n11\n' | env HOME="$CASE_HOME" PATH="$TEST_BIN:$ORIGINAL_PATH" \
+menu_output=$(printf '7\n12\n' | env HOME="$CASE_HOME" PATH="$TEST_BIN:$ORIGINAL_PATH" \
     TERM=dumb TEST_POWER_SOURCE=Battery TEST_BATTERY_PERCENT=50 \
     TEST_BATTERY_MODE=discharging TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false \
     TEST_CLEAR_LOG="$CASE_HOME/clear.log" TERM_PROGRAM=iTerm.app \
@@ -664,7 +748,7 @@ fi
 # Trigger choices use plain language and state exactly when speech stops.
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" "10:LOW:1:100:ten percent"
-trigger_help_output=$(printf '2\n50\nc\n11\n' | env HOME="$CASE_HOME" PATH="$TEST_BIN:$ORIGINAL_PATH" \
+trigger_help_output=$(printf '2\n50\nc\n12\n' | env HOME="$CASE_HOME" PATH="$TEST_BIN:$ORIGINAL_PATH" \
     TERM=dumb TEST_POWER_SOURCE=Battery TEST_BATTERY_PERCENT=50 \
     TEST_BATTERY_MODE=discharging TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false \
     "$ROOT_DIR/battmon" 2>&1)
@@ -682,7 +766,7 @@ fi
 # Percentages below 30 are always LOW and skip the ambiguous type question.
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" "10:LOW:1:100:ten percent"
-auto_low_add_output=$(printf '2\n25\n\n2\n\n11\n' | env HOME="$CASE_HOME" \
+auto_low_add_output=$(printf '2\n25\n\n2\n\n12\n' | env HOME="$CASE_HOME" \
     PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
     TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
     TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" 2>&1)
@@ -700,7 +784,7 @@ fi
 # flow also skips type input.
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" "25:HIGH:1:100:legacy alert"
-auto_low_edit_output=$(printf '1\n1\n\n2\n\n11\n' | env HOME="$CASE_HOME" \
+auto_low_edit_output=$(printf '1\n1\n\n2\n\n12\n' | env HOME="$CASE_HOME" \
     PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
     TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
     TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" 2>&1)
@@ -741,7 +825,7 @@ fi
 # Add and edit flows both expose the optional Until stopped mode.
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" "10:LOW:1:100:ten percent"
-add_output=$(printf '2\n50\n2\n\n2\n\n11\n' | env HOME="$CASE_HOME" \
+add_output=$(printf '2\n50\n2\n\n2\n\n12\n' | env HOME="$CASE_HOME" \
     PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
     TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
     TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" 2>&1)
@@ -755,7 +839,7 @@ else
     fail "new alerts can use clear Until stopped behavior"
 fi
 
-edit_output=$(printf '1\n2\n\n2\n\n11\n' | env HOME="$CASE_HOME" \
+edit_output=$(printf '1\n2\n\n2\n\n12\n' | env HOME="$CASE_HOME" \
     PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
     TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
     TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" 2>&1)
@@ -770,7 +854,7 @@ fi
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" \
     "20:LOW:0:100:unlimited" "10:LOW:1:100:fixed"
-timing_output=$(printf '6\n1\n\n200\ny\n\n11\n' | env HOME="$CASE_HOME" \
+timing_output=$(printf '6\n1\n\n200\ny\n\n12\n' | env HOME="$CASE_HOME" \
     PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
     TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
     TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" 2>&1)
@@ -786,7 +870,7 @@ fi
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" \
     "20:LOW:3:100:twenty" "10:LOW:1:100:ten"
-unlimited_timing_output=$(printf '6\n2\n50\ny\n\n11\n' | env HOME="$CASE_HOME" \
+unlimited_timing_output=$(printf '6\n2\n50\ny\n\n12\n' | env HOME="$CASE_HOME" \
     PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
     TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
     TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" 2>&1)
@@ -802,7 +886,7 @@ fi
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" \
     "20:LOW:3:100:twenty" "10:LOW:1:100:ten"
-default_timing_output=$(printf '5\n\n50\ny\n2\ny\n\n11\n' | env HOME="$CASE_HOME" \
+default_timing_output=$(printf '5\n\n50\ny\n2\ny\n\n12\n' | env HOME="$CASE_HOME" \
     PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
     TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
     TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" 2>&1)
@@ -816,7 +900,7 @@ else
 fi
 
 # Audio settings expose and persist the media pause/resume switch.
-media_setting_output=$(printf '7\n1\n\nn\n3\n11\n' | env HOME="$CASE_HOME" \
+media_setting_output=$(printf '8\n1\n\nn\n3\n12\n' | env HOME="$CASE_HOME" \
     PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
     TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
     TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false "$ROOT_DIR/battmon" 2>&1)
@@ -830,7 +914,7 @@ fi
 # Permission setup is intentional, read-only, and reports each running app.
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" "10:LOW:1:100:ten percent"
-permission_output=$(printf '7\n2\n\n3\n11\n' | env HOME="$CASE_HOME" \
+permission_output=$(printf '8\n2\n\n3\n12\n' | env HOME="$CASE_HOME" \
     PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
     TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
     TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false TEST_SAY_LOG="$SAY_LOG" \
@@ -849,7 +933,7 @@ fi
 # The interactive test uses the production media pause/restore/resume path.
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" "10:LOW:1:100:ten percent"
-media_test_output=$(printf '8\n5\n\n\n11\n' | env HOME="$CASE_HOME" \
+media_test_output=$(printf '9\n5\n\n\n12\n' | env HOME="$CASE_HOME" \
     PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
     TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
     TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false TEST_SAY_LOG="$SAY_LOG" \
@@ -866,7 +950,7 @@ fi
 # Native-player permission failures name the player and explain macOS Automation access.
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" "10:LOW:1:100:ten percent"
-spotify_help_output=$(printf '8\n5\n\n\n11\n' | env HOME="$CASE_HOME" \
+spotify_help_output=$(printf '9\n5\n\n\n12\n' | env HOME="$CASE_HOME" \
     PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TERM_PROGRAM=iTerm.app TEST_POWER_SOURCE=Battery \
     TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
     TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false TEST_SAY_LOG="$SAY_LOG" \
@@ -884,7 +968,7 @@ fi
 # Browser permission failures explain the exact recovery step.
 new_case
 write_config "$CASE_HOME/.battmon/battery_config.sh" "10:LOW:1:100:ten percent"
-browser_help_output=$(printf '8\n5\n\n\n11\n' | env HOME="$CASE_HOME" \
+browser_help_output=$(printf '9\n5\n\n\n12\n' | env HOME="$CASE_HOME" \
     PATH="$TEST_BIN:$ORIGINAL_PATH" TERM=dumb TEST_POWER_SOURCE=Battery \
     TEST_BATTERY_PERCENT=60 TEST_BATTERY_MODE=discharging \
     TEST_AUDIO_VOLUME=80 TEST_AUDIO_MUTED=false TEST_SAY_LOG="$SAY_LOG" \
@@ -902,15 +986,38 @@ fi
 new_case
 if env HOME="$CASE_HOME" PATH="$TEST_BIN:$ORIGINAL_PATH" "$ROOT_DIR/setup.sh" --no-start >/dev/null; then
     if [ -L "$CASE_HOME/.local/bin/battmon" ] && \
+        [ "$(readlink "$CASE_HOME/.local/bin/battmon")" = "$ROOT_DIR/battmon" ] && \
+        cmp -s "$ROOT_DIR/battmon" "$CASE_HOME/.battmon/battmon" && \
+        cmp -s "$ROOT_DIR/battery_monitor.sh" "$CASE_HOME/.battmon/battery_monitor.sh" && \
+        cmp -s "$ROOT_DIR/battmon_common.sh" "$CASE_HOME/.battmon/battmon_common.sh" && \
         [ ! -e "$CASE_HOME/.local/bin/battery" ] && \
         [ ! -e "$CASE_HOME/Library/LaunchAgents/com.battery.batmon.plist" ] && \
         [ "$(stat -f '%Lp' "$CASE_HOME/.battmon/battery_config.sh")" = "600" ]; then
-        pass "safe no-start installation"
+        pass "installer points the command at the checkout and refreshes installed copies"
     else
-        fail "safe no-start installation"
+        fail "installer points the command at the checkout and refreshes installed copies"
     fi
 else
-    fail "safe no-start installation"
+    fail "installer points the command at the checkout and refreshes installed copies"
+fi
+
+new_case
+SETUP_TEST_BIN=$(mktemp -d "$TEST_ROOT/setup-bin.XXXXXX")
+cat > "$SETUP_TEST_BIN/launchctl" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+chmod +x "$SETUP_TEST_BIN/launchctl"
+if env HOME="$CASE_HOME" PATH="$SETUP_TEST_BIN:$TEST_BIN:$ORIGINAL_PATH" \
+    "$ROOT_DIR/setup.sh" >/dev/null; then
+    if grep -Fq "<string>$ROOT_DIR/battery_monitor.sh</string>" \
+        "$CASE_HOME/Library/LaunchAgents/com.battery.batmon.plist"; then
+        pass "LaunchAgent points to the current checkout"
+    else
+        fail "LaunchAgent points to the current checkout"
+    fi
+else
+    fail "LaunchAgent points to the current checkout"
 fi
 
 if env HOME="$CASE_HOME" PATH="$TEST_BIN:$ORIGINAL_PATH" "$ROOT_DIR/setup.sh" --no-start >/dev/null && \

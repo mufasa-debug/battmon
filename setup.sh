@@ -70,13 +70,16 @@ remove_managed_link() {
 }
 
 list_runtime_monitor_pids() {
-    local pid_value command_value monitor_script="$RUNTIME_DIR/battery_monitor.sh"
+    local pid_value command_value monitor_script="$RUNTIME_DIR/battery_monitor.sh" source_monitor="$SCRIPT_DIR/battery_monitor.sh"
     while read -r pid_value command_value; do
         [[ "$pid_value" =~ ^[0-9]+$ ]] || continue
         case "$command_value" in
             "/bin/bash $monitor_script"|\
             "/bin/bash $monitor_script --test-media"|\
-            "/bin/bash $monitor_script --check-media-permissions")
+            "/bin/bash $monitor_script --check-media-permissions"|\
+            "/bin/bash $source_monitor"|\
+            "/bin/bash $source_monitor --test-media"|\
+            "/bin/bash $source_monitor --check-media-permissions")
                 printf '%s\n' "$pid_value"
                 ;;
         esac
@@ -84,7 +87,7 @@ list_runtime_monitor_pids() {
 }
 
 runtime_monitor_pid_is_alive() {
-    local pid_value="$1" command_value state_value monitor_script="$RUNTIME_DIR/battery_monitor.sh"
+    local pid_value="$1" command_value state_value monitor_script="$RUNTIME_DIR/battery_monitor.sh" source_monitor="$SCRIPT_DIR/battery_monitor.sh"
     [[ "$pid_value" =~ ^[0-9]+$ ]] || return 1
     kill -0 "$pid_value" 2>/dev/null || return 1
     state_value=$(ps -p "$pid_value" -o state= 2>/dev/null || true)
@@ -93,7 +96,10 @@ runtime_monitor_pid_is_alive() {
     case "$command_value" in
         "/bin/bash $monitor_script"|\
         "/bin/bash $monitor_script --test-media"|\
-        "/bin/bash $monitor_script --check-media-permissions") return 0 ;;
+        "/bin/bash $monitor_script --check-media-permissions"|\
+        "/bin/bash $source_monitor"|\
+        "/bin/bash $source_monitor --test-media"|\
+        "/bin/bash $source_monitor --check-media-permissions") return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -288,12 +294,12 @@ prepare_command_link() {
     for alias_name in Battmon batmon Batmon battery battery-monitor; do
         remove_managed_link "$BIN_DIR/$alias_name"
     done
-    ln -s "$RUNTIME_DIR/battmon" "$LINK_PATH"
+    ln -s "$SCRIPT_DIR/battmon" "$LINK_PATH"
 
     # Also link to /usr/local/bin if available and writable by user
     if [ -d "/usr/local/bin" ] && [ -w "/usr/local/bin" ]; then
         if [ ! -e "/usr/local/bin/battmon" ] || managed_link_target "/usr/local/bin/battmon"; then
-            ln -sf "$RUNTIME_DIR/battmon" "/usr/local/bin/battmon" 2>/dev/null || true
+            ln -sf "$SCRIPT_DIR/battmon" "/usr/local/bin/battmon" 2>/dev/null || true
         fi
     fi
 
@@ -334,7 +340,7 @@ write_plist() {
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>$RUNTIME_DIR/battery_monitor.sh</string>
+        <string>$SCRIPT_DIR/battery_monitor.sh</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

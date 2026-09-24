@@ -29,10 +29,46 @@ set_builtin_defaults() {
     ALERTS=(
         "100:HIGH:10:100:Battery is fully charged"
         "80:HIGH:10:100:The battery is optimally charged"
-        "10:LOW:15:100:Charge up your battery"
+        "15:LOW:15:100:Charge up your battery"
         "5:LOW:20:100:Battery is critically low"
         "1:LOW:20:100:Battery is critically low"
     )
+    ALERT_TIMES=()
+}
+
+is_valid_alert_time_range() {
+    [[ "$1" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || return 1
+    [ "${1%-*}" != "${1#*-}" ]
+}
+
+alert_time_is_quiet_now() {
+    local range start end now now_minutes start_minutes end_minutes
+    now=$(date '+%H:%M') || return 1
+    [[ "$now" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || return 1
+    now_minutes=$((10#${now%:*} * 60 + 10#${now#*:}))
+    for range in "${ALERT_TIMES[@]}"; do
+        start="${range%-*}"
+        end="${range#*-}"
+        start_minutes=$((10#${start%:*} * 60 + 10#${start#*:}))
+        end_minutes=$((10#${end%:*} * 60 + 10#${end#*:}))
+        if [ "$start_minutes" -lt "$end_minutes" ]; then
+            [ "$now_minutes" -ge "$start_minutes" ] && [ "$now_minutes" -lt "$end_minutes" ] && return 0
+        elif [ "$now_minutes" -ge "$start_minutes" ] || [ "$now_minutes" -lt "$end_minutes" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+is_retired_builtin_alert() {
+    case "$PARSED_LVL:$PARSED_TYP:$PARSED_MSG" in
+        "39:LOW:Battery is at 39 percent"|\
+        "13:LOW:Battery is at 13 percent"|\
+        "10:LOW:Charge up your battery"|\
+        "10:LOW:Battery is at 10 percent. Charge up your battery"|\
+        "6:LOW:Battery is at 6 percent") return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 is_integer_in_range() {
@@ -78,9 +114,14 @@ parse_alert_entry() {
 normalize_config() {
     local warnings=""
     local original_alerts=("${ALERTS[@]}")
+    local original_alert_times=()
     local normalized=()
     local keys=()
-    local alert key existing_index idx existing message new_message
+    local alert alert_time key existing_index idx existing message new_message
+
+    if [ "${#ALERT_TIMES[@]}" -gt 0 ]; then
+        original_alert_times=("${ALERT_TIMES[@]}")
+    fi
 
     if ! is_integer_in_range "${REPEAT_COUNT:-}" 1 100; then
         warnings="${warnings}invalid REPEAT_COUNT; "
@@ -111,8 +152,21 @@ normalize_config() {
         *) PAUSE_MEDIA=true; warnings="${warnings}invalid PAUSE_MEDIA; " ;;
     esac
 
+    ALERT_TIMES=()
+    for alert_time in "${original_alert_times[@]}"; do
+        if is_valid_alert_time_range "$alert_time"; then
+            ALERT_TIMES+=("$alert_time")
+        else
+            warnings="${warnings}skipped invalid alert time range; "
+        fi
+    done
+
     for alert in "${original_alerts[@]}"; do
         parse_alert_entry "$alert"
+        if is_retired_builtin_alert; then
+            warnings="${warnings}removed retired built-in ${PARSED_LVL}% alert; "
+            continue
+        fi
         if ! is_integer_in_range "$PARSED_LVL" 1 100; then
             warnings="${warnings}skipped invalid alert level; "
             continue
@@ -224,9 +278,12 @@ list_managed_monitor_pids() {
     while read -r pid_value command_value; do
         [[ "$pid_value" =~ ^[0-9]+$ ]] || continue
         case "$command_value" in
-            "/bin/bash $monitor_script"|\
-            "/bin/bash $monitor_script --test-media"|\
-            "/bin/bash $monitor_script --check-media-permissions")
+        "/bin/bash $monitor_script"|\
+        "/bin/bash $monitor_script --test-media"|\
+        "/bin/bash $monitor_script --check-media-permissions"|\
+        "/bin/bash $BATTMON_COMMON_DIR/battery_monitor.sh"|\
+        "/bin/bash $BATTMON_COMMON_DIR/battery_monitor.sh --test-media"|\
+        "/bin/bash $BATTMON_COMMON_DIR/battery_monitor.sh --check-media-permissions")
                 printf '%s\n' "$pid_value"
                 ;;
         esac
@@ -243,7 +300,10 @@ is_managed_monitor_pid() {
     case "$command_value" in
         "/bin/bash $monitor_script"|\
         "/bin/bash $monitor_script --test-media"|\
-        "/bin/bash $monitor_script --check-media-permissions") return 0 ;;
+        "/bin/bash $monitor_script --check-media-permissions"|\
+        "/bin/bash $BATTMON_COMMON_DIR/battery_monitor.sh"|\
+        "/bin/bash $BATTMON_COMMON_DIR/battery_monitor.sh --test-media"|\
+        "/bin/bash $BATTMON_COMMON_DIR/battery_monitor.sh --check-media-permissions") return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -323,6 +383,12 @@ save_config() {
         printf 'ALERT_VOLUME=%s\n' "$ALERT_VOLUME"
         printf 'RESTORE_VOLUME=%s\n' "$RESTORE_VOLUME"
         printf 'PAUSE_MEDIA=%s\n\n' "$PAUSE_MEDIA"
+        printf 'ALERT_TIMES=(\n'
+        local alert_time
+        for alert_time in "${ALERT_TIMES[@]}"; do
+            printf '    %q\n' "$alert_time"
+        done
+        printf ')\n\n'
         printf 'ALERTS=(\n'
         local alert
         for alert in "${ALERTS[@]}"; do

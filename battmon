@@ -110,7 +110,7 @@ write_launch_agent() {
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>$HOME/.battmon/battery_monitor.sh</string>
+        <string>$SCRIPT_DIR/battery_monitor.sh</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -254,7 +254,7 @@ install_symlinks() {
             return 1
         fi
     fi
-    ln -sfn "$RUNTIME_DIR/battmon" "$link_path"
+    ln -sfn "$SCRIPT_DIR/battmon" "$link_path"
 }
 
 prompt_number() {
@@ -436,6 +436,11 @@ show_status() {
     printf " Volume target         : %s%%\n" "$ALERT_VOLUME"
     printf " Pause playing media   : %s\n" "$([ "$PAUSE_MEDIA" = true ] && echo On || echo Off)"
     printf " Startup quiet period  : %s seconds\n" "$STARTUP_GRACE_SECONDS"
+    if [ "${#ALERT_TIMES[@]}" -eq 0 ]; then
+        printf " Alert times           : Off\n"
+    else
+        printf " Alert times           : %s configured\n" "${#ALERT_TIMES[@]}"
+    fi
     if is_service_running; then
         echo " Background service    : Running"
     else
@@ -880,6 +885,114 @@ audio_media_menu() {
     done
 }
 
+show_alert_times() {
+    if [ "${#ALERT_TIMES[@]}" -eq 0 ]; then
+        echo "No quiet times configured. Alerts can happen at any time."
+        return
+    fi
+    local idx=1 range
+    for range in "${ALERT_TIMES[@]}"; do
+        printf '  %d) %s to %s\n' "$idx" "$(format_alert_time "${range%-*}")" "$(format_alert_time "${range#*-}")"
+        idx=$((idx + 1))
+    done
+}
+
+parse_user_alert_time() {
+    local value="$1" hour_text minute suffix hour
+    value="${value// /}"
+    [[ "$value" =~ ^([0-9]{1,2})(:([0-5][0-9]))?([AaPp][Mm])$ ]] || return 1
+    hour_text="${BASH_REMATCH[1]}"
+    minute="${BASH_REMATCH[3]:-00}"
+    suffix="${BASH_REMATCH[4]}"
+    is_integer_in_range "$hour_text" 1 12 || return 1
+    hour=$((10#$hour_text))
+    case "$suffix" in
+        [Pp][Mm]) [ "$hour" -ne 12 ] && hour=$((hour + 12)) ;;
+        *) [ "$hour" -eq 12 ] && hour=0 ;;
+    esac
+    printf -v NORMALIZED_ALERT_TIME '%02d:%s' "$hour" "$minute"
+}
+
+format_alert_time() {
+    local value="$1" hour minute suffix
+    hour=$((10#${value%:*}))
+    minute="${value#*:}"
+    if [ "$hour" -ge 12 ]; then suffix="PM"; else suffix="AM"; fi
+    hour=$((hour % 12))
+    [ "$hour" -eq 0 ] && hour=12
+    printf '%d:%s %s' "$hour" "$minute" "$suffix"
+}
+
+prompt_alert_time() {
+    local prompt="$1" result_var="$2" value
+    while true; do
+        if ! read -r -p "$prompt" value; then return 1; fi
+        if [ "$value" = "c" ] || [ "$value" = "C" ]; then return 1; fi
+        if parse_user_alert_time "$value"; then
+            printf -v "$result_var" '%s' "$NORMALIZED_ALERT_TIME"
+            return 0
+        fi
+        echo "Enter a time like 2:00 AM or 10 AM, or 'c' to cancel."
+    done
+}
+
+edit_alert_time_range() {
+    local result_var="$1" start end
+    echo "Enter each time with AM or PM (for example, 2:00 AM)."
+    prompt_alert_time "Start time (e.g. 2:00 AM): " start || return 1
+    prompt_alert_time "End time (e.g. 10:00 AM): " end || return 1
+    if [ "$start" = "$end" ]; then
+        echo "Start and end time must be different. No change was saved."
+        return 1
+    fi
+    printf -v "$result_var" '%s' "${start}-${end}"
+}
+
+alert_times_menu() {
+    while true; do
+        echo ""
+        echo "─── Alert Times ──────────────────────────────────────────────────────────"
+        echo "Add or edit the times when alerts should stay quiet."
+        show_alert_times
+        echo "  1) Add a quiet time"
+        echo "  2) Edit a quiet time"
+        echo "  3) Delete a quiet time"
+        echo "  4) Return to Main Menu"
+        echo "──────────────────────────────────────────────────────────────────────────"
+        local choice range index replacement
+        if ! prompt_number "Enter choice [1-4] (or 'c' to cancel): " 1 4 "4" choice; then return; fi
+        case "$choice" in
+            1)
+                if edit_alert_time_range range; then
+                    ALERT_TIMES+=("$range")
+                    save_config || return
+                fi
+                ;;
+            2|3)
+                if [ "${#ALERT_TIMES[@]}" -eq 0 ]; then echo "There are no quiet times to change."; continue; fi
+                if [ "$choice" = "2" ]; then
+                    echo "Enter the number beside the quiet-time range you want to edit."
+                else
+                    echo "Enter the number beside the quiet-time range you want to delete."
+                fi
+                if ! prompt_number "Quiet-time number [1-${#ALERT_TIMES[@]}] (or 'c' to cancel): " 1 "${#ALERT_TIMES[@]}" "" index; then continue; fi
+                index=$((index - 1))
+                if [ "$choice" = "2" ]; then
+                    if edit_alert_time_range replacement; then
+                        ALERT_TIMES[$index]="$replacement"
+                        save_config || return
+                    fi
+                else
+                    unset 'ALERT_TIMES[index]'
+                    ALERT_TIMES=("${ALERT_TIMES[@]}")
+                    save_config || return
+                fi
+                ;;
+            4) return ;;
+        esac
+    done
+}
+
 reset_defaults() {
     echo ""
     echo "─── Reset Everything to Default ──────────────────────────────────────────"
@@ -1076,7 +1189,7 @@ service_menu() {
             3) service_restart ;;
             4)
                 echo "Running monitor check..."
-                ensure_active_config && sync_runtime_files && /bin/bash "$RUNTIME_DIR/battery_monitor.sh"
+                ensure_active_config && sync_runtime_files && /bin/bash "$SCRIPT_DIR/battery_monitor.sh"
                 local monitor_result=$?
                 if [ "$monitor_result" -eq 0 ]; then
                     echo "Monitor check completed."
@@ -1128,6 +1241,11 @@ main_menu() {
         [ "$pct" = "N/A" ] && bat_str=" Battery: Not detected"
         printf "%-36s | Volume: %s (target %s%%)\n" "$bat_str" "${cur_v}" "$ALERT_VOLUME"
         printf "%-36s | Stop: charger or MUTE/DOWN\n" "$monitor_line"
+        if [ "${#ALERT_TIMES[@]}" -eq 0 ]; then
+            printf " Alert Times: Off — add or edit alert times in option 7.\n"
+        else
+            printf " Alert Times: %s quiet range(s) configured.\n" "${#ALERT_TIMES[@]}"
+        fi
         echo "──────────────────────────────────────────────────────────────────────────"
         echo " Configured Alerts:"
         local idx=0
@@ -1147,14 +1265,14 @@ main_menu() {
             printf "  • %3d%% [%-8s] %-3s %4sms \"%s\"\n" "$PARSED_LVL" "$ui_type" "$(repeat_compact_display "$PARSED_REP")" "$PARSED_DEL" "$trunc_msg"
         done
         echo "──────────────────────────────────────────────────────────────────────────"
-        printf "  1) Edit an alert rule            7) Audio & media settings\n"
-        printf "  2) Add new battery alert         8) Test voice & silencing keys\n"
-        printf "  3) Delete an alert rule          9) Background service controls\n"
-        printf "  4) View all alerts & status     10) Reset everything to default\n"
-        printf "  5) Change repeat & pause delay  11) Exit Battmon\n"
-        printf "  6) Apply to existing rules\n"
+        printf "  1) Edit an alert rule            7) Alert Times\n"
+        printf "  2) Add new battery alert         8) Audio & media settings\n"
+        printf "  3) Delete an alert rule          9) Test voice & silencing keys\n"
+        printf "  4) View all alerts & status     10) Background service controls\n"
+        printf "  5) Change repeat & pause delay  11) Reset everything to default\n"
+        printf "  6) Apply to existing rules      12) Exit Battmon\n"
         echo "──────────────────────────────────────────────────────────────────────────"
-        if ! read -r -p " Enter choice [1-11] (or 'c' to exit): " choice; then
+        if ! read -r -p " Enter choice [1-12] (or 'c' to exit): " choice; then
             echo ""
             echo "Input closed. Goodbye!"
             return 0
@@ -1175,16 +1293,17 @@ main_menu() {
                 ;;
             5) edit_timing ;;
             6) apply_timing_to_existing_rules ;;
-            7) audio_media_menu ;;
-            8) test_voice_interruption ;;
-            9) service_menu ;;
-            10) reset_defaults ;;
-            11)
+            7) alert_times_menu ;;
+            8) audio_media_menu ;;
+            9) test_voice_interruption ;;
+            10) service_menu ;;
+            11) reset_defaults ;;
+            12)
                 echo "Goodbye!"
                 exit 0
                 ;;
             *)
-                echo "Please enter a number between 1 and 11 (or 'c' to exit)."
+                echo "Please enter a number between 1 and 12 (or 'c' to exit)."
                 sleep 0.8
                 ;;
         esac

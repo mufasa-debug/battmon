@@ -15,7 +15,7 @@
    chmod +x setup.sh battmon battery_monitor.sh && ./setup.sh
 
 4. CHOOSE YOUR SETUP:
-   • Press 1 for Quick Install (Default alerts at 100%, 80%, 10%, 5%, 1%).
+   • Press 1 for Quick Install (Default alerts at 100%, 80%, 15%, 5%, 1%).
    • Or press 2 if you want to add custom percentages right away.
 
 That's it! Battmon will now speak alerts in the background.

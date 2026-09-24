@@ -31,7 +31,7 @@ flowchart TD
 
 ## Configuration ownership
 
-`~/.battmon/battery_config.sh` is the only writable source of truth. The Desktop/package copy is a seed for a first install and is never silently synchronized back from the active config.
+`~/.battmon/battery_config.sh` is the only writable source of truth. The Desktop/package copy is a seed for a first install and is never silently synchronized back from the active config. The CLI link and LaunchAgent point to the source checkout used by `setup.sh`; keep that checkout path stable so CLI and monitor runs always use the current files. Re-running setup refreshes the compatibility copies under `~/.battmon` and rebinds the LaunchAgent after a checkout move.
 
 The manager records a checksum when loading the config. Before saving, it takes a lock and compares the current checksum with the loaded checksum. If another manager wrote a newer version, the stale save is rejected. Writes use a temporary file in the runtime directory followed by an atomic rename. Before a changed file is replaced, its exact prior contents are copied to `~/.battmon/backups/`; byte-identical saves are treated as no-ops and do not replace the inode.
 
@@ -75,6 +75,10 @@ Only the selected rule is announced. State is persisted before speech begins so 
 Before selecting a rule, the monitor checks the current GUI session through `ioreg`. Its potentially large output is reduced directly by `awk`; the full response is never copied and rewritten inside Bash. While `CGSSessionScreenIsLocked` is true, no alert is spoken. It also reads `kern.boottime` through `sysctl` and stays silent for `STARTUP_GRACE_SECONDS` (default 300 seconds) after a cold boot.
 
 Suppression is persisted in `LAST_SESSION_BLOCKED`. On the first active check after the lock or startup quiet period ends, Battmon records the current percentage, power direction, and any exact matching rule as a silent baseline. This prevents the same 1% rule from firing one minute after unlock while allowing it to re-arm normally after the battery leaves that percentage.
+
+## User-configured alert times
+
+`ALERT_TIMES` is an optional list of local 24-hour ranges in `HH:MM-HH:MM` form. It is empty by default. Ordinary ranges include their start and exclude their end; ranges whose end is earlier than their start cross midnight. During a configured quiet range the monitor writes the current battery state as a baseline and exits without selecting or speaking an alert, so suppressed threshold crossings are not replayed after quiet time. Invalid ranges are skipped during config normalization.
 
 ## State and locks
 
@@ -139,10 +143,10 @@ If the original audio state cannot be read, Battmon speaks without changing volu
 2. Syntax-check every installed shell file.
 3. Refuse to overwrite an unrelated `~/.local/bin/battmon` command.
 4. Back up the active configuration.
-5. Atomically deploy the CLI, engine, and common library.
+5. Atomically refresh CLI, engine, and common-library compatibility copies under `~/.battmon`.
 6. Migrate/normalize the active config.
 7. Remove only legacy aliases that still point to Battmon.
-8. Generate and validate the LaunchAgent.
+8. Generate and validate a LaunchAgent that runs the engine from the source checkout.
 9. Load and verify the service, unless `--no-start` was requested.
 
 The installer never calls Homebrew and never changes shell startup files. Uninstall removes only verified Battmon-owned command links. Configuration is preserved unless `--purge` is explicitly supplied, and purge first creates a backup.

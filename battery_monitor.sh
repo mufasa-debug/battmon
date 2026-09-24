@@ -1035,6 +1035,12 @@ main() {
         exit 0
     fi
 
+    if [ "${#ALERT_TIMES[@]}" -gt 0 ] && alert_time_is_quiet_now; then
+        baseline_current_state || log_event "[Warning] Could not persist quiet-time baseline"
+        log_event "[Alert Suppressed] Quiet time is active; current battery state was used as a silent baseline"
+        exit 0
+    fi
+
     if ! select_trigger_rule; then
         # Preserve the alert marker while nothing changed; clearing it here would
         # allow the same exact threshold to fire again on the following run.

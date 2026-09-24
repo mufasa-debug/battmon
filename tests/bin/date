@@ -1,0 +1,6 @@
+#!/bin/bash
+if [ "$1" = "+%H:%M" ] && [ -n "${TEST_CURRENT_TIME:-}" ]; then
+    printf '%s\n' "$TEST_CURRENT_TIME"
+    exit 0
+fi
+exec /bin/date "$@"

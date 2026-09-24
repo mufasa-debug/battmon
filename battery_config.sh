@@ -21,11 +21,11 @@ PAUSE_MEDIA=true
 ALERTS=(
     "100:HIGH:20:100:Battery is fully charged"
     "80:HIGH:20:100:The battery is optimally charged"
-    "39:LOW:20:100:Battery is at 39 percent"
     "15:LOW:20:100:Battery is at 15 percent"
-    "13:LOW:20:50:Battery is at 13 percent"
-    "10:LOW:20:100:Battery is at 10 percent. Charge up your battery"
-    "6:LOW:15:100:Battery is at 6 percent"
     "5:LOW:20:100:Battery is critically low"
     "1:LOW:20:100:Battery is critically low"
 )
+
+# Optional local-time ranges during which alerts should stay silent.
+# Use 24-hour HH:MM-HH:MM format; an empty list disables quiet times.
+ALERT_TIMES=()

@@ -25,18 +25,16 @@ Battmon includes a clean, easy-to-read menu that opens right in your Mac's Termi
  Configured Alerts:
   • 100% [HIGH] 20x  100ms "Battery is fully charged"
   •  80% [HIGH] 20x  100ms "The battery is optimally charged"
-  •  39% [LOW ] 20x  100ms "Battery is at 39 percent"
   •  15% [LOW ] 20x  100ms "Battery is at 15 percent"
-  •  13% [LOW ] 20x   50ms "Battery is at 13 percent"
-  •  10% [LOW ] 20x  100ms "Battery is at 10 percent"
-    (... and 4 more alerts - view all via option 4)
+  •   5% [LOW ] 20x  100ms "Battery is critically low"
+  •   1% [LOW ] 20x  100ms "Battery is critically low"
 ──────────────────────────────────────────────────────────────────────────
-  1) Edit an alert rule            7) Change volume target
-  2) Add new battery alert         8) Test voice & silencing keys
-  3) Delete an alert rule          9) Background service controls
-  4) View all alerts & status     10) Reset everything to default
-  5) Change repeat & pause delay  11) Exit Battmon
-  6) Apply to existing rules
+  1) Edit an alert rule            7) Alert Times
+  2) Add new battery alert         8) Audio & media settings
+  3) Delete an alert rule          9) Test voice & silencing keys
+  4) View all alerts & status     10) Background service controls
+  5) Change repeat & pause delay  11) Reset everything to default
+  6) Apply to existing rules      12) Exit Battmon
 ──────────────────────────────────────────────────────────────────────────
 ```
 
@@ -62,6 +60,9 @@ Don't want to plug in right now? Just press the physical **Mute (F10)** or **Vol
 ### 🔊 Smart Volume (Never Too Quiet)
 If your Mac was muted or set to a very low volume (like 10%), Battmon temporarily raises the volume so you can clearly hear the alert, and **puts your volume right back where you had it** as soon as it's done.
 
+### 🌙 Alert Times
+Choose **Alert Times** in the main menu to add, edit, or remove quiet-time ranges. Enter a start time and an end time separately, using AM or PM (for example, `2:00 AM` to `10:00 AM`). Alerts are enabled at all times until you add a range. During quiet time Battmon continues tracking battery state without speaking, so it does not replay a missed alert when quiet time ends. Overnight ranges such as `10:00 PM` to `7:00 AM` are supported.
+
 ### 🗣️ Real-Time Percentage
 If your battery drops from 15% to 14% while speaking, Battmon dynamically says *"Battery is at 14 percent"*. It always tells you the real number.
 
@@ -85,10 +86,10 @@ chmod +x setup.sh battmon battery_monitor.sh && ./setup.sh
 ```
 
 ### Step 3: Choose Quick Setup
-* Press **1** and hit **Enter** for the recommended setup (alerts at 100%, 80%, 10%, 5%, and 1%).
+* Press **1** and hit **Enter** for the recommended setup (alerts at 100%, 80%, 15%, 5%, and 1%).
 * Or press **2** if you want to add your own custom percentages right away.
 
-**That’s it!** Battmon is now installed and running quietly in the background. It will automatically start every time you restart your Mac.
+**That’s it!** Battmon is now installed and running quietly in the background. It will automatically start every time you restart your Mac. The `battmon` command and background monitor run from the checkout where setup was launched, so edits in that folder are used on their next run. Keep the folder at the same path; run `./setup.sh` again if you move it.
 
 ---
 
