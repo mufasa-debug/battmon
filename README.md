@@ -1,10 +1,10 @@
-# 🦇 Battmon
+# Battmon
 
 ### Your Mac talks to you when your battery needs attention.
 
 [![Platform](https://img.shields.io/badge/platform-macOS%2010.13+-black?style=flat&logo=apple)](https://www.apple.com/macos/)
 [![Language](https://img.shields.io/badge/built%20with-Native%20macOS%20Bash-green.svg?style=flat)](https://www.gnu.org/software/bash/)
-[![Dependencies](https://img.shields.io/badge/extra%20downloads-Zero%20(None!)-blue.svg?style=flat)](#-prerequisites)
+[![Dependencies](https://img.shields.io/badge/extra%20downloads-Zero%20(None!)-blue.svg?style=flat)](#prerequisites)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat)](LICENSE)
 
 **Battmon** gives your Mac a clear voice. It speaks out loud when your battery is getting low or when it finishes charging. 
@@ -13,12 +13,12 @@ No more missing silent pop-up banners. No more sudden laptop shutdowns while you
 
 ---
 
-## 📺 What It Looks Like
+## What It Looks Like
 
 Battmon includes a clean, easy-to-read menu that opens right in your Mac's Terminal:
 
 ```text
-─── BATTMON 🦇 Battery Voice Monitor ─────────────────────────────────────
+─── BATTMON Battery Voice Monitor ────────────────────────────────────────
  Battery: 42% (On Battery)           | Current system volume: 75%
  Volume target: 60%                  | Silencing: Charger or MUTE/VOL-DOWN
 ──────────────────────────────────────────────────────────────────────────
@@ -40,7 +40,7 @@ Battmon includes a clean, easy-to-read menu that opens right in your Mac's Termi
 
 ---
 
-## 💡 Why Use Battmon?
+## Why Use Battmon?
 
 * **Never miss a low battery warning**: macOS notification banners are easy to miss when watching a video, gaming, or working in full screen. Battmon actually tells you out loud before your laptop goes to sleep.
 * **Protect your battery health**: Charging all the way to 100% every single time wears out lithium-ion batteries faster. Battmon can remind you at 80% so you can unplug and keep your battery healthy for years.
@@ -49,29 +49,29 @@ Battmon includes a clean, easy-to-read menu that opens right in your Mac's Termi
 
 ---
 
-## ✨ Features (Explained Simply)
+## Features (Explained Simply)
 
-### 🔌 Plug In To Silence
+### Plug In To Silence
 When Battmon warns you that your battery is low, **simply plug in your charger.** The exact millisecond your charger connects, Battmon immediately stops talking. (Likewise, when it warns you that charging is finished, unplugging stops it immediately).
 
-### 🔇 Keyboard Friendly
+### Keyboard Friendly
 Don't want to plug in right now? Just press the physical **Mute (F10)** or **Volume Down (F11)** key on your keyboard. Battmon detects the keypress, stops talking mid-sentence, and leaves your sound muted.
 
-### 🔊 Smart Volume (Never Too Quiet)
+### Smart Volume (Never Too Quiet)
 If your Mac was muted or set to a very low volume (like 10%), Battmon temporarily raises the volume so you can clearly hear the alert, and **puts your volume right back where you had it** as soon as it's done.
 
-### 🌙 Alert Times
+### Alert Times
 Choose **Alert Times** in the main menu to add, edit, or remove quiet-time ranges. Enter a start time and an end time separately, using AM or PM (for example, `2:00 AM` to `10:00 AM`). Alerts are enabled at all times until you add a range. During quiet time Battmon continues tracking battery state without speaking, so it does not replay a missed alert when quiet time ends. Overnight ranges such as `10:00 PM` to `7:00 AM` are supported.
 
-### 🗣️ Real-Time Percentage
+### Real-Time Percentage
 If your battery drops from 15% to 14% while speaking, Battmon dynamically says *"Battery is at 14 percent"*. It always tells you the real number.
 
-### ⚡ Pick Your Own Numbers & Messages
+### Pick Your Own Numbers & Messages
 Want an alert at 67%? Or 82%? Want it to say *"Hey, grab your charger!"* or say it in a British or French accent? You can customize any percentage, message, repeat count, and voice.
 
 ---
 
-## 🚀 Quick Setup (30 Seconds)
+## Quick Setup (30 Seconds)
 
 ### Step 1: Open Terminal
 Press **`Cmd + Space`**, type **`Terminal`**, and press **Enter**.
@@ -93,7 +93,7 @@ chmod +x setup.sh battmon battery_monitor.sh && ./setup.sh
 
 ---
 
-## 🎮 Everyday Usage
+## Everyday Usage
 
 Once installed, you can run `battmon` from any Terminal window:
 
@@ -109,7 +109,7 @@ Once installed, you can run `battmon` from any Terminal window:
 
 ---
 
-## 🛠️ Adding or Changing Alerts
+## Adding or Changing Alerts
 
 You can change anything by typing `battmon` in Terminal:
 
@@ -123,14 +123,14 @@ Battmon saves your changes automatically. Even if you reinstall or update Battmo
 
 ---
 
-## 📋 Prerequisites
+## Prerequisites
 
 * Works on **any Mac** running macOS 10.13 (High Sierra) or newer.
 * **Zero extra downloads**: Uses only tools that already come with macOS (`pmset`, `say`, `osascript`, `bash`). No Homebrew, Python, or Xcode required.
 
 ---
 
-## 🗑️ How to Uninstall
+## How to Uninstall
 
 If you ever want to remove Battmon completely, just run:
 
@@ -143,7 +143,7 @@ This completely unloads the background service, removes global shortcuts, and cl
 
 ---
 
-## 🤝 For Developers
+## For Developers
 
 Interested in the technical internals? Battmon features:
 * Asynchronous PID tracking for instant sub-second speech interruption
@@ -155,6 +155,6 @@ Read the complete [Developer & Architecture Guide](DEVELOPER_GUIDE.md) for full 
 
 ---
 
-## 📄 License
+## License
 
 Released under the open-source [MIT License](LICENSE). Feel free to use, modify, and share!
